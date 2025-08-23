@@ -234,6 +234,11 @@ export default function HIVMemoryTCellGame() {
           <div className="mt-3 text-sm text-zinc-200 space-y-2">
             <p><strong>Idea:</strong> HIV can hide in memory T-cells (yellow). ART blocks most new spread but doesn’t remove hidden cells.</p>
             <p><strong>Try this:</strong> Turn <em>ART OFF</em> → Start <em>Run</em> → after <em>10 seconds</em>, hit <em>Flush Free Virus</em> → after <em>2 seconds</em>, <em>Introduce Pathogen</em>.</p>
+            <p className="text-[11px] text-zinc-400 leading-snug">
+              This schematic visualization is not drawn to anatomical scale. Cell sizes, counts, and timing
+              — including infection frequency — are intentionally simplified for educational purposes and
+              do not represent clinical infection rates, transmission probabilities, or treatment performance.
+            </p>
           </div>
         </div>
       </section>
@@ -344,4 +349,5 @@ function dist(x1, y1, x2, y2) {
 }
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+
 
