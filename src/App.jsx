@@ -53,12 +53,8 @@ export default function HIVMemoryTCellGame() {
       // 1) Virions drift
       setVirions(vs => moveVirions(vs, worldW, worldH));
 
-      // 2) Active cells shed virus (suppressed by ART)
-      setVirions(vs => {
-        const activeCount = cells.filter(c => c.s === STATUS.ACTIVE).length;
-        const produced = artOn ? 0 : Math.min(40, Math.floor(activeCount * 1.5));
-        return produced > 0 ? vs.concat(spawnVirions(produced, worldW, worldH, /*centerBias=*/true, cells)) : vs;
-      });
+      // 2) Producer shedding disabled: free virus changes only via +50 and Flush
+      setVirions(vs => vs);
 
       // 3) ART OFF → infections happen in batches every 2 seconds:
       //    infect 1 healthy + 1 more per +100 virions present.
@@ -90,8 +86,8 @@ export default function HIVMemoryTCellGame() {
       // 4) ART ON → block all new infections (no entry, no replication)
       // (intentionally no infection logic when ART is ON)
 
-      // 5) Gentle decay of free virus
-      setVirions(vs => vs.filter((_, i) => i % 25 !== 0)); // drop ~4% each tick
+      // 5) Free virus decay only when ART is ON; stays constant when ART is OFF
+      setVirions(vs => (artOn ? vs.filter((_, i) => i % 25 !== 0) : vs));
 
       // 6) Some active cells die naturally (very simplified)
       setCells(prev => prev.map(c => (c.s === STATUS.ACTIVE && Math.random() < 0.002) ? { ...c, s: STATUS.DEAD } : c));
@@ -117,7 +113,7 @@ export default function HIVMemoryTCellGame() {
     // Reactivate latent cells → active producers (educational blip)
     setCells(prev => prev.map(c => (c.s === STATUS.LATENT ? { ...c, s: STATUS.ACTIVE } : c)));
 
-    // Small immediate boost in virions from newly reactivated cells (unless ART ON)
+    // Immediate boost only if ART is OFF
     setVirions(vs => artOn ? vs : vs.concat(spawnVirions(Math.min(60, latent * 2), worldW, worldH, true, cells)));
   }
 
@@ -199,26 +195,60 @@ export default function HIVMemoryTCellGame() {
         {/* Controls + Story */}
         <div className="rounded-3xl p-4 bg-zinc-900 shadow-inner flex flex-col gap-3">
           <h2 className="text-lg font-semibold">Play</h2>
+
+          {/* Control buttons */}
           <div className="flex flex-wrap gap-2">
-            <button onClick={() => setArtOn(v => !v)} className={`px-3 py-2 rounded-2xl ${artOn ? "bg-indigo-500" : "bg-indigo-700"}`}>{artOn ? "ART: ON (suppresses spread)" : "ART: OFF"}</button>
+            <button
+              onClick={() => setArtOn(v => !v)}
+              className={`px-3 py-2 rounded-2xl ${artOn ? "bg-indigo-500" : "bg-indigo-700"}`}
+            >
+              {artOn ? "ART: ON (blocks new infections)" : "ART: OFF"}
+            </button>
             <button onClick={flushVirus} className="px-3 py-2 rounded-2xl bg-purple-800">Flush Free Virus</button>
             <button onClick={() => addVirions(50)} className="px-3 py-2 rounded-2xl bg-pink-600">+50 Virions</button>
             <button onClick={introducePathogen} className="px-3 py-2 rounded-2xl bg-rose-700">Introduce Pathogen</button>
           </div>
 
+          {/* Live metrics */}
           <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
             <Metric label="Healthy" value={healthy} />
             <Metric label="Latent reservoir" value={latent} />
             <Metric label="Active infected" value={active} />
-            <Metric label="Free virus" value={virions.length} />
+            <Metric label="Free virus (viral load)" value={virions.length} />
           </div>
 
-          <div className="mt-3 text-sm text-zinc-200 space-y-2">
-            <p><strong>Idea:</strong> HIV can hide in memory T-cells (yellow). ART blocks most new spread but doesn’t remove hidden cells.</p>
-            <p><strong>Try this:</strong> Turn <em>ART OFF</em> → Start <em>Run</em> → after <em>10 seconds</em>, hit <em>Flush Free Virus</em> → after <em>2 seconds</em>, <em>Introduce Pathogen</em>.</p>
+          {/* Instructions & activity */}
+          <div className="mt-3 text-sm text-zinc-200 space-y-3">
+            <p className="text-[12px] text-zinc-300">
+              <strong>What “+50 Virions” means:</strong> Adds 50 free virus particles. This simulates either (a) infected
+              memory T-cells releasing virus, or (b) new exposure entering the body (e.g., sharing needles with an infected
+              person or sexual transmission).
+            </p>
+
+            <div className="space-y-1">
+              <p className="font-semibold">Group 1</p>
+              <p>
+                <strong>Try this:</strong> Make sure <em>ART is OFF</em> → <em>Start Run</em> → after <em>10 seconds</em>, hit
+                <em> Flush Free Virus</em> → after <em>2 seconds</em> <em>Introduce Pathogen</em>.
+              </p>
+              <ul className="list-disc ml-5">
+                <li>How many <strong>Healthy</strong> cells are there?</li>
+                <li>What is the <strong>viral load / viral count</strong>?</li>
+              </ul>
+            </div>
+
+            <div className="space-y-1">
+              <p className="font-semibold">Group 2</p>
+              <p>
+                <strong>Try this:</strong> <em>Start Run</em> → turn <em>ART OFF</em> → hit <em>Flush Free Virus</em> → now
+                <em> Introduce Pathogen</em>.
+              </p>
+            </div>
+
             <p className="text-[11px] text-zinc-400 leading-snug">
-              This schematic visualization is not drawn to anatomical scale. Cell sizes, counts, and timing; including infection frequency are intentionally
-              simplified for educational purposes and do not represent clinical infection rates, transmission probabilities, or treatment performance.
+              This schematic visualization is not drawn to anatomical scale. Cell sizes, counts, and timing; including infection
+              frequency are intentionally simplified for educational purposes and do not represent clinical infection rates,
+              transmission probabilities, or treatment performance.
             </p>
           </div>
         </div>
@@ -330,6 +360,7 @@ function dist(x1, y1, x2, y2) {
 }
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+
 
 
 
