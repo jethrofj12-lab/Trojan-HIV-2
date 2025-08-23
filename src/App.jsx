@@ -16,9 +16,11 @@ export default function HIVMemoryTCellGame() {
   const [artOn, setArtOn] = useState(false); // default ART OFF (toggle ON to suppress spread)
   const [showPathogenFX, setShowPathogenFX] = useState(false);
 
-  // Stopwatch (count-up) + infection throttle accumulator
+  // Stopwatch (count-up) + infection throttles
   const [elapsedMs, setElapsedMs] = useState(0);
-  const infectAccumRef = useRef(0);
+  const infectAccumRef = useRef(0);       // for ART OFF batching
+  const artInfectCooldownRef = useRef(0); // for ART ON cap (≤1 every 5s)
+
   function formatTime(ms) {
     const s = Math.max(0, Math.floor(ms / 1000));
     const m = Math.floor(s / 60);
@@ -47,6 +49,11 @@ export default function HIVMemoryTCellGame() {
 
       // Stopwatch tick
       setElapsedMs(ms => ms + 320);
+
+      // Cooldown tick for ART-on cap
+      if (artInfectCooldownRef.current > 0) {
+        artInfectCooldownRef.current = Math.max(0, artInfectCooldownRef.current - 320);
+      }
 
       // 1) Virions drift
       setVirions(vs => moveVirions(vs, worldW, worldH));
@@ -86,23 +93,40 @@ export default function HIVMemoryTCellGame() {
         }
       }
 
-      // 3) Proximity infections only when ART is ON (kept tiny)
+      // 3) Proximity infections when ART is ON (heavily suppressed)
       if (artOn) {
         setCells(prev => {
           const next = [...prev];
+
+          // Mechanistic knobs (simple proxies):
+          // - receptor competition: most entries blocked before fusion
+          // - replication blocked: no new virions (handled above)
+          // - mutated copies prevented: infections (if any) go LATENT only
           const baseProb = 0.22;
-          const prob = baseProb * 0.08; // ART dramatically lowers entry
-          for (let v of virions) {
-            for (let i = 0; i < next.length; i++) {
-              const c = next[i];
-              if (c.s !== STATUS.HEALTHY) continue;
-              if (dist(c.x, c.y, v.x, v.y) < c.r + 4) {
-                if (Math.random() < prob) {
-                  const latent = Math.random() < 0.6;
-                  next[i] = { ...c, s: latent ? STATUS.LATENT : STATUS.ACTIVE };
+          const receptorBlock = 0.7;           // ~70% entries blocked at CD4/coreceptors
+          const prob = baseProb * 0.06 * (1 - receptorBlock); // tiny residual chance
+          const allowThisTick = artInfectCooldownRef.current === 0;
+          let didInfect = false;
+
+          if (allowThisTick) {
+            outer:
+            for (let v of virions) {
+              for (let i = 0; i < next.length; i++) {
+                const c = next[i];
+                if (c.s !== STATUS.HEALTHY) continue;
+                if (dist(c.x, c.y, v.x, v.y) < c.r + 4) {
+                  if (Math.random() < prob) {
+                    // Under ART: if infection slips through, it becomes LATENT only (no producers)
+                    next[i] = { ...c, s: STATUS.LATENT };
+                    didInfect = true;
+                    break outer; // cap to ≤1 infection per window
+                  }
                 }
               }
             }
+          }
+          if (didInfect) {
+            artInfectCooldownRef.current = 5000; // 5s cooldown
           }
           return next;
         });
@@ -151,6 +175,7 @@ export default function HIVMemoryTCellGame() {
     setTick(0);
     setElapsedMs(0);                // stopwatch back to 0
     infectAccumRef.current = 0;
+    artInfectCooldownRef.current = 0;
     setArtOn(false);                // default back to ART OFF
     setRunning(false);
   }
@@ -348,6 +373,7 @@ function dist(x1, y1, x2, y2) {
 }
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+
 
 
 
