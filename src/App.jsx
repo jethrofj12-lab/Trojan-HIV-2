@@ -1,20 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // ------------------------------------------------------------
-// HIV Memory T-cell Game — Simple Visual (v0.2 + timer/slower spread)
-// ------------------------------------------------------------
-// Audience: general public (no science background)
-// Visual model:
-//  • Large green circles = healthy memory CD4+ T-cells
-//  • Yellow rings = latently infected memory T-cells (quiet, infected)
-//  • Red circles (pulsing) = actively producing HIV
-//  • Small pink dots = free HIV virions
-//  • Purple star burst appears when a new pathogen is introduced (memory activation)
-// Controls:
-//  • Run/Pause, ART On/Off, Flush Virus, Introduce Pathogen
-// Key idea:
-//  Even if free virus is flushed (undetectable), yellow latent cells remain and
-//  can wake up on a new infection (pathogen) → red producers → viral “blip.”
+// HIV Memory T-cell Game — Simple Visual (v0.2 + stopwatch/slower spread)
 // ------------------------------------------------------------
 
 const STATUS = {
@@ -25,14 +12,12 @@ const STATUS = {
 };
 
 export default function HIVMemoryTCellGame() {
-  // Tuned for a calm visual experience
   const [running, setRunning] = useState(false);
   const [artOn, setArtOn] = useState(true); // default ART ON for teaching U=U context
   const [showPathogenFX, setShowPathogenFX] = useState(false);
 
-  // Timer (2-minute countdown) + infection throttle accumulator
-  const [durationMs, setDurationMs] = useState(2 * 60 * 1000);
-  const [remainingMs, setRemainingMs] = useState(durationMs);
+  // Stopwatch (count-up) + infection throttle accumulator
+  const [elapsedMs, setElapsedMs] = useState(0);
   const infectAccumRef = useRef(0);
   function formatTime(ms) {
     const s = Math.max(0, Math.floor(ms / 1000));
@@ -41,15 +26,17 @@ export default function HIVMemoryTCellGame() {
     return `${m}:${ss}`;
   }
 
-  const worldW = 680; // px
-  const worldH = 440; // px
+  // Bigger playfield
+  const worldW = 960; // px (was 680)
+  const worldH = 600; // px (was 440)
 
   // Build a large field of memory T-cells
   const cellCount = 1000;
   const initial = useMemo(() => placeCells(cellCount, worldW, worldH), []);
   const [cells, setCells] = useState(initial);
 
-  const [virions, setVirions] = useState(() => spawnVirions(30, worldW, worldH));
+  // Start with 100 free virions (was 30)
+  const [virions, setVirions] = useState(() => spawnVirions(100, worldW, worldH));
   const [tick, setTick] = useState(0);
 
   // Simple loop (~320ms tick)
@@ -58,14 +45,8 @@ export default function HIVMemoryTCellGame() {
     const id = setInterval(() => {
       setTick(t => t + 1);
 
-      // Timer tick
-      let expired = false;
-      setRemainingMs(ms => {
-        const next = Math.max(0, ms - 320);
-        if (next === 0 && ms > 0) expired = true;
-        return next;
-      });
-      if (expired) { setRunning(false); return; }
+      // Stopwatch tick
+      setElapsedMs(ms => ms + 320);
 
       // 1) Virions drift
       setVirions(vs => moveVirions(vs, worldW, worldH));
@@ -151,14 +132,8 @@ export default function HIVMemoryTCellGame() {
     setShowPathogenFX(true);
     setTimeout(() => setShowPathogenFX(false), 800);
 
-    // Activate a chunk of memory population
-    setCells(prev => prev.map(c => {
-      if (c.s === STATUS.LATENT) {
-        // Reactivation of latent cells → active producers
-        return { ...c, s: STATUS.ACTIVE };
-      }
-      return c;
-    }));
+    // Reactivate latent cells
+    setCells(prev => prev.map(c => (c.s === STATUS.LATENT ? { ...c, s: STATUS.ACTIVE } : c)));
 
     // Small immediate boost in virions from newly reactivated cells (unless ART ON)
     setVirions(vs => artOn ? vs : vs.concat(spawnVirions(Math.min(60, latent * 2), worldW, worldH, true, cells)));
@@ -171,10 +146,10 @@ export default function HIVMemoryTCellGame() {
 
   function reset() {
     setCells(placeCells(cellCount, worldW, worldH));
-    setVirions(spawnVirions(30, worldW, worldH));
+    setVirions(spawnVirions(100, worldW, worldH)); // keep 100 on reset too
     setShowPathogenFX(false);
     setTick(0);
-    setRemainingMs(durationMs);
+    setElapsedMs(0);                // stopwatch back to 0
     infectAccumRef.current = 0;
     setArtOn(true);
     setRunning(false);
@@ -185,7 +160,7 @@ export default function HIVMemoryTCellGame() {
       <header className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl md:text-3xl font-semibold">HIV & Memory T-cells — Simple Visual</h1>
         <div className="flex items-center gap-2">
-          <div className="px-3 py-1 rounded-xl bg-zinc-800/70 font-mono">{formatTime(remainingMs)}</div>
+          <div className="px-3 py-1 rounded-xl bg-zinc-800/70 font-mono">{formatTime(elapsedMs)}</div>
           <button onClick={() => setRunning(r => !r)} className={`px-4 py-2 rounded-2xl shadow ${running ? "bg-amber-600" : "bg-emerald-600"}`}>{running ? "Pause" : "Run"}</button>
           <button onClick={reset} className="px-3 py-2 rounded-2xl bg-zinc-700">Reset</button>
         </div>
@@ -208,9 +183,7 @@ export default function HIVMemoryTCellGame() {
               {/* Cells */}
               {cells.map((c, i) => (
                 <g key={i}>
-                  {c.s === STATUS.HEALTHY && (
-                    <circle cx={c.x} cy={c.y} r={c.r} className="fill-emerald-500" />
-                  )}
+                  {c.s === STATUS.HEALTHY && <circle cx={c.x} cy={c.y} r={c.r} className="fill-emerald-500" />}
                   {c.s === STATUS.LATENT && (
                     <>
                       <circle cx={c.x} cy={c.y} r={c.r-3} className="fill-zinc-900" />
@@ -223,9 +196,7 @@ export default function HIVMemoryTCellGame() {
                       <animate attributeName="r" values={`${c.r};${c.r+2};${c.r}`} dur="0.9s" repeatCount="indefinite" />
                     </circle>
                   )}
-                  {c.s === STATUS.DEAD && (
-                    <circle cx={c.x} cy={c.y} r={c.r} className="fill-zinc-600" />
-                  )}
+                  {c.s === STATUS.DEAD && <circle cx={c.x} cy={c.y} r={c.r} className="fill-zinc-600" />}
                 </g>
               ))}
 
@@ -249,7 +220,7 @@ export default function HIVMemoryTCellGame() {
           <div className="flex flex-wrap gap-2">
             <button onClick={() => setArtOn(v => !v)} className={`px-3 py-2 rounded-2xl ${artOn ? "bg-indigo-500" : "bg-indigo-700"}`}>{artOn ? "ART: ON (suppresses spread)" : "ART: OFF"}</button>
             <button onClick={flushVirus} className="px-3 py-2 rounded-2xl bg-purple-800">Flush Free Virus</button>
-            <button onClick={() => addVirions(10)} className="px-3 py-2 rounded-2xl bg-pink-600">+10 Virions</button>
+            <button onClick={() => addVirions(50)} className="px-3 py-2 rounded-2xl bg-pink-600">+50 Virions</button>
             <button onClick={introducePathogen} className="px-3 py-2 rounded-2xl bg-rose-700">Introduce Pathogen</button>
           </div>
 
@@ -373,3 +344,4 @@ function dist(x1, y1, x2, y2) {
 }
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+
