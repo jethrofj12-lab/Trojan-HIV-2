@@ -13,7 +13,7 @@ const STATUS = {
 
 export default function HIVMemoryTCellGame() {
   const [running, setRunning] = useState(false);
-  const [artOn, setArtOn] = useState(true); // default ART ON for teaching U=U context
+  const [artOn, setArtOn] = useState(false); // default ART OFF (toggle ON to suppress spread)
   const [showPathogenFX, setShowPathogenFX] = useState(false);
 
   // Stopwatch (count-up) + infection throttle accumulator
@@ -27,15 +27,15 @@ export default function HIVMemoryTCellGame() {
   }
 
   // Bigger playfield
-  const worldW = 960; // px (was 680)
-  const worldH = 600; // px (was 440)
+  const worldW = 960; // px
+  const worldH = 600; // px
 
   // Build a large field of memory T-cells
   const cellCount = 1000;
   const initial = useMemo(() => placeCells(cellCount, worldW, worldH), []);
   const [cells, setCells] = useState(initial);
 
-  // Start with 100 free virions (was 30)
+  // Start with 100 free virions
   const [virions, setVirions] = useState(() => spawnVirions(100, worldW, worldH));
   const [tick, setTick] = useState(0);
 
@@ -151,7 +151,7 @@ export default function HIVMemoryTCellGame() {
     setTick(0);
     setElapsedMs(0);                // stopwatch back to 0
     infectAccumRef.current = 0;
-    setArtOn(true);
+    setArtOn(false);                // default back to ART OFF
     setRunning(false);
   }
 
@@ -235,9 +235,8 @@ export default function HIVMemoryTCellGame() {
             <p><strong>Idea:</strong> HIV can hide in memory T-cells (yellow). ART blocks most new spread but doesn’t remove hidden cells.</p>
             <p><strong>Try this:</strong> Turn <em>ART OFF</em> → Start <em>Run</em> → after <em>10 seconds</em>, hit <em>Flush Free Virus</em> → after <em>2 seconds</em>, <em>Introduce Pathogen</em>.</p>
             <p className="text-[11px] text-zinc-400 leading-snug">
-              This schematic visualization is not drawn to anatomical scale. Cell sizes, counts, and timing
-              — including infection frequency — are intentionally simplified for educational purposes and
-              do not represent clinical infection rates, transmission probabilities, or treatment performance.
+              This schematic visualization is not drawn to anatomical scale. Cell sizes, counts, and timing; including infection frequency are intentionally
+              simplified for educational purposes and do not represent clinical infection rates, transmission probabilities, or treatment performance.
             </p>
           </div>
         </div>
@@ -349,5 +348,6 @@ function dist(x1, y1, x2, y2) {
 }
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+
 
 
