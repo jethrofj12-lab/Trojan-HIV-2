@@ -1,12 +1,12 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // ------------------------------------------------------------
-// HIV Memory T‑cell Game — Simple Visual (v0.2)
+// HIV Memory T-cell Game — Simple Visual (v0.2 + timer/slower spread)
 // ------------------------------------------------------------
 // Audience: general public (no science background)
 // Visual model:
-//  • Large green circles = healthy memory CD4+ T‑cells
-//  • Yellow rings = latently infected memory T‑cells (quiet, infected)
+//  • Large green circles = healthy memory CD4+ T-cells
+//  • Yellow rings = latently infected memory T-cells (quiet, infected)
 //  • Red circles (pulsing) = actively producing HIV
 //  • Small pink dots = free HIV virions
 //  • Purple star burst appears when a new pathogen is introduced (memory activation)
@@ -30,22 +30,42 @@ export default function HIVMemoryTCellGame() {
   const [artOn, setArtOn] = useState(true); // default ART ON for teaching U=U context
   const [showPathogenFX, setShowPathogenFX] = useState(false);
 
+  // Timer (2-minute countdown) + infection throttle accumulator
+  const [durationMs, setDurationMs] = useState(2 * 60 * 1000);
+  const [remainingMs, setRemainingMs] = useState(durationMs);
+  const infectAccumRef = useRef(0);
+  function formatTime(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(s / 60);
+    const ss = String(s % 60).padStart(2, "0");
+    return `${m}:${ss}`;
+  }
+
   const worldW = 680; // px
   const worldH = 440; // px
 
-  // Build a small field of memory T‑cells laid out randomly but non‑overlapping
-  const cellCount = 36;
+  // Build a large field of memory T-cells
+  const cellCount = 1000;
   const initial = useMemo(() => placeCells(cellCount, worldW, worldH), []);
   const [cells, setCells] = useState(initial);
 
   const [virions, setVirions] = useState(() => spawnVirions(30, worldW, worldH));
   const [tick, setTick] = useState(0);
 
-  // Simple loop
+  // Simple loop (~320ms tick)
   useEffect(() => {
     if (!running) return;
     const id = setInterval(() => {
       setTick(t => t + 1);
+
+      // Timer tick
+      let expired = false;
+      setRemainingMs(ms => {
+        const next = Math.max(0, ms - 320);
+        if (next === 0 && ms > 0) expired = true;
+        return next;
+      });
+      if (expired) { setRunning(false); return; }
 
       // 1) Virions drift
       setVirions(vs => moveVirions(vs, worldW, worldH));
@@ -57,25 +77,55 @@ export default function HIVMemoryTCellGame() {
         return produced > 0 ? vs.concat(spawnVirions(produced, worldW, worldH, /*centerBias=*/true, cells)) : vs;
       });
 
-      // 3) Infection checks: virions near healthy cells may infect (ART reduces chance)
-      setCells(prev => {
-        const next = [...prev];
-        const baseProb = 0.22; // simple, readable dynamics
-        const prob = artOn ? baseProb * 0.08 : baseProb; // ART dramatically lowers entry
-        for (let v of virions) {
-          for (let i = 0; i < next.length; i++) {
-            const c = next[i];
-            if (c.s !== STATUS.HEALTHY) continue;
-            if (dist(c.x, c.y, v.x, v.y) < c.r + 4) {
-              if (Math.random() < prob) {
-                const latent = Math.random() < 0.6; // most infections seed latent reservoir
-                next[i] = { ...c, s: latent ? STATUS.LATENT : STATUS.ACTIVE };
+      // 2b) Slowed spread when ART is OFF — batch infections every 2s.
+      // Infect 1 healthy cell every 2s + 1 extra per +100 virions.
+      infectAccumRef.current += 320;
+      if (!artOn && infectAccumRef.current >= 2000) {
+        const steps = Math.floor(infectAccumRef.current / 2000);
+        infectAccumRef.current -= steps * 2000;
+        for (let s = 0; s < steps; s++) {
+          setCells(prev => {
+            const next = [...prev];
+            const healthyIdx = [];
+            for (let i = 0; i < next.length; i++) if (next[i].s === STATUS.HEALTHY) healthyIdx.push(i);
+            if (!healthyIdx.length) return next;
+            const toInfect = Math.min(
+              healthyIdx.length,
+              1 + Math.floor((Array.isArray(virions) ? virions.length : 0) / 100)
+            );
+            for (let k = 0; k < toInfect; k++) {
+              if (!healthyIdx.length) break;
+              const idx = healthyIdx.splice(Math.floor(Math.random() * healthyIdx.length), 1)[0];
+              const c = next[idx];
+              const latent = Math.random() < 0.6; // most infections seed latent reservoir
+              next[idx] = { ...c, s: latent ? STATUS.LATENT : STATUS.ACTIVE };
+            }
+            return next;
+          });
+        }
+      }
+
+      // 3) Proximity infections only when ART is ON (kept tiny)
+      if (artOn) {
+        setCells(prev => {
+          const next = [...prev];
+          const baseProb = 0.22;
+          const prob = baseProb * 0.08; // ART dramatically lowers entry
+          for (let v of virions) {
+            for (let i = 0; i < next.length; i++) {
+              const c = next[i];
+              if (c.s !== STATUS.HEALTHY) continue;
+              if (dist(c.x, c.y, v.x, v.y) < c.r + 4) {
+                if (Math.random() < prob) {
+                  const latent = Math.random() < 0.6;
+                  next[i] = { ...c, s: latent ? STATUS.LATENT : STATUS.ACTIVE };
+                }
               }
             }
           }
-        }
-        return next;
-      });
+          return next;
+        });
+      }
 
       // 4) Gentle decay of free virus
       setVirions(vs => vs.filter((_, i) => i % 25 !== 0)); // drop ~4% each tick
@@ -119,12 +169,13 @@ export default function HIVMemoryTCellGame() {
     setVirions(vs => vs.concat(spawnVirions(n, worldW, worldH)));
   }
 
-
   function reset() {
     setCells(placeCells(cellCount, worldW, worldH));
     setVirions(spawnVirions(30, worldW, worldH));
     setShowPathogenFX(false);
     setTick(0);
+    setRemainingMs(durationMs);
+    infectAccumRef.current = 0;
     setArtOn(true);
     setRunning(false);
   }
@@ -132,8 +183,9 @@ export default function HIVMemoryTCellGame() {
   return (
     <div className="w-full min-h-screen bg-zinc-950 text-zinc-100 p-6 flex flex-col gap-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl md:text-3xl font-semibold">HIV & Memory T‑cells — Simple Visual</h1>
+        <h1 className="text-2xl md:text-3xl font-semibold">HIV & Memory T-cells — Simple Visual</h1>
         <div className="flex items-center gap-2">
+          <div className="px-3 py-1 rounded-xl bg-zinc-800/70 font-mono">{formatTime(remainingMs)}</div>
           <button onClick={() => setRunning(r => !r)} className={`px-4 py-2 rounded-2xl shadow ${running ? "bg-amber-600" : "bg-emerald-600"}`}>{running ? "Pause" : "Run"}</button>
           <button onClick={reset} className="px-3 py-2 rounded-2xl bg-zinc-700">Reset</button>
         </div>
@@ -184,7 +236,7 @@ export default function HIVMemoryTCellGame() {
             </svg>
           </div>
           <div className="flex flex-wrap gap-3 mt-3 text-xs text-zinc-300">
-            <LegendDot cls="bg-emerald-500" label="Healthy memory T‑cell" />
+            <LegendDot cls="bg-emerald-500" label="Healthy memory T-cell" />
             <LegendDot cls="bg-yellow-300 ring-2 ring-yellow-300" label="Latent (quiet)" ring />
             <LegendDot cls="bg-red-500" label="Active (making HIV)" />
             <LegendDot cls="bg-fuchsia-400" label="HIV virion" small />
@@ -209,8 +261,8 @@ export default function HIVMemoryTCellGame() {
           </div>
 
           <div className="mt-3 text-sm text-zinc-200 space-y-2">
-            <p><strong>Idea:</strong> HIV can hide in memory T‑cells (yellow). ART blocks most new spread but doesn’t remove hidden cells.</p>
-            <p><strong>Try this:</strong> Start <em>Run</em> → hit <em>Flush Free Virus</em> → keep <em>ART ON</em> → now <em>Introduce Pathogen</em>. Latent cells wake up and make HIV (red), even though blood virus was undetectable.</p>
+            <p><strong>Idea:</strong> HIV can hide in memory T-cells (yellow). ART blocks most new spread but doesn’t remove hidden cells.</p>
+            <p><strong>Try this:</strong> Turn <em>ART OFF</em> → Start <em>Run</em> → after <em>10 seconds</em>, hit <em>Flush Free Virus</em> → after <em>2 seconds</em>, <em>Introduce Pathogen</em>.</p>
           </div>
         </div>
       </section>
@@ -252,9 +304,30 @@ function Star({ cx, cy, r }) {
 
 // ---------- Layout helpers ----------
 function placeCells(n, w, h) {
+  // For big n, use a jittered grid so it renders smoothly.
+  if (n > 200) {
+    const cols = Math.ceil(Math.sqrt((n * w) / h));
+    const rows = Math.ceil(n / cols);
+    const cellW = w / cols;
+    const cellH = h / rows;
+    const r = Math.max(3, Math.floor(Math.min(cellW, cellH) * 0.35));
+    const cells = [];
+    for (let i = 0; i < n; i++) {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const jitterX = (Math.random() - 0.5) * cellW * 0.4;
+      const jitterY = (Math.random() - 0.5) * cellH * 0.4;
+      const x = (col + 0.5) * cellW + jitterX;
+      const y = (row + 0.5) * cellH + jitterY;
+      cells.push({ x: clamp(x, 6, w - 6), y: clamp(y, 6, h - 6), r, s: STATUS.HEALTHY });
+    }
+    return cells;
+  }
+
+  // small-n fallback: random non-overlapping
   const cells = [];
   let tries = 0;
-  while (cells.length < n && tries < 5000) {
+  while (cells.length < n && tries < 50000) {
     tries++;
     const r = 16;
     const x = 20 + Math.random() * (w - 40);
