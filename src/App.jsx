@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // ------------------------------------------------------------
-// HIV Memory T-cell Game — Simple Visual (v0.3 — no latent, pathogen boosts virions)
+// HIV Memory T-cell Game — Simple Visual (v0.3.2 — text update + latent logic for ART)
 // ------------------------------------------------------------
 
 const STATUS = {
   HEALTHY: "HEALTHY",
+  LATENT: "LATENT",   // internal; not drawn, counted with ACTIVE in metrics
   ACTIVE: "ACTIVE",
   DEAD: "DEAD",
 };
@@ -43,6 +44,15 @@ export default function HIVMemoryTCellGame() {
   const DEATH_DELAY_MS = 30000; // 30s lag before any deaths start
   const DEATH_CHANCE_PER_TICK_AFTER_DELAY = 0.02; // then small chance each tick
 
+  // When ART turns ON, convert ACTIVE -> LATENT (quiet / internal)
+  useEffect(() => {
+    if (artOn) {
+      setCells(prev =>
+        prev.map(c => (c.s === STATUS.ACTIVE ? { ...c, s: STATUS.LATENT, ageMs: 0 } : c))
+      );
+    }
+  }, [artOn]);
+
   // Main loop (~320ms)
   useEffect(() => {
     if (!running) return;
@@ -53,8 +63,8 @@ export default function HIVMemoryTCellGame() {
       // Accumulator for 2s infection cadence (ART OFF only)
       infectAccumRef.current += 320;
 
-      // 1) Virions drift (positions only)
-      setVirions(vs => moveVirions(vs, worldW, worldH)); // no auto growth/decay
+      // 1) Virions drift (positions only) — no auto growth/decay
+      setVirions(vs => moveVirions(vs, worldW, worldH));
 
       // 2) ART OFF → infections happen in batches every 2 seconds:
       //    infect 1 healthy + 1 more per +100 virions present.
@@ -75,7 +85,7 @@ export default function HIVMemoryTCellGame() {
               if (!healthyIdx.length) break;
               const idx = healthyIdx.splice(Math.floor(Math.random() * healthyIdx.length), 1)[0];
               const c = next[idx];
-              // no latent: infections become ACTIVE immediately, age starts at 0
+              // become ACTIVE immediately (no visible latent on infection)
               next[idx] = { ...c, s: STATUS.ACTIVE, ageMs: 0 };
             }
             return next;
@@ -98,9 +108,11 @@ export default function HIVMemoryTCellGame() {
     return () => clearInterval(id);
   }, [running, artOn, cells, virions]);
 
-  // Derived counts
+  // Derived counts (latent counted together with active)
   const healthy = cells.filter(c => c.s === STATUS.HEALTHY).length;
   const active = cells.filter(c => c.s === STATUS.ACTIVE).length;
+  const latent = cells.filter(c => c.s === STATUS.LATENT).length;
+  const activeLatent = active + latent;
   const dead = cells.filter(c => c.s === STATUS.DEAD).length;
 
   // Actions
@@ -113,9 +125,12 @@ export default function HIVMemoryTCellGame() {
     setShowPathogenFX(true);
     setTimeout(() => setShowPathogenFX(false), 800);
 
-    // Pathogen increases free virus (no latent reactivation in this version)
+    // Pathogen increases free virus
     const PATHOGEN_VIRUS_BOOST = 100;
     setVirions(vs => vs.concat(spawnVirions(PATHOGEN_VIRUS_BOOST, worldW, worldH, true, cells)));
+
+    // Reactivate latent cells → ACTIVE
+    setCells(prev => prev.map(c => (c.s === STATUS.LATENT ? { ...c, s: STATUS.ACTIVE, ageMs: 0 } : c)));
   }
 
   // Manually introduce more free HIV virions
@@ -138,7 +153,7 @@ export default function HIVMemoryTCellGame() {
     <div className="w-full min-h-screen bg-zinc-950 text-zinc-100 p-6 flex flex-col gap-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl md:text-3xl font-semibold">HIV & Memory T-cells — Simple Visual</h1>
-        <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2">
           <div className="px-3 py-1 rounded-xl bg-zinc-800/70 font-mono">{formatTime(elapsedMs)}</div>
           <button onClick={() => setRunning(r => !r)} className={`px-4 py-2 rounded-2xl shadow ${running ? "bg-amber-600" : "bg-emerald-600"}`}>{running ? "Pause" : "Run"}</button>
           <button onClick={reset} className="px-3 py-2 rounded-2xl bg-zinc-700">Reset</button>
@@ -159,7 +174,7 @@ export default function HIVMemoryTCellGame() {
                 </g>
               )}
 
-              {/* Cells */}
+              {/* Cells (LATENT is hidden) */}
               {cells.map((c, i) => (
                 <g key={i}>
                   {c.s === STATUS.HEALTHY && <circle cx={c.x} cy={c.y} r={c.r} className="fill-emerald-500" />}
@@ -186,7 +201,7 @@ export default function HIVMemoryTCellGame() {
           </div>
         </div>
 
-        {/* Controls + explanations + metrics */}
+        {/* Controls + explanations + metrics (your exact wording) */}
         <div className="rounded-3xl p-4 bg-zinc-900 shadow-inner flex flex-col gap-3">
           <h2 className="text-lg font-semibold">Play</h2>
           <div className="flex flex-wrap gap-2">
@@ -198,22 +213,51 @@ export default function HIVMemoryTCellGame() {
 
           <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
             <Metric label="Healthy" value={healthy} />
-            <Metric label="Active infected" value={active} />
-            <Metric label="Dead cells" value={dead} />
+            <Metric label="Active/latent" value={activeLatent} />
+            <Metric label="Dead memory t-cells" value={dead} />
             <Metric label="Free virus" value={virions.length} />
           </div>
 
-          <div className="mt-3 text-sm text-zinc-200 space-y-2">
-            <p><strong>Idea:</strong> ART blocks most new spread; flushing removes free virus, but existing infected cells persist until they die off.</p>
+          <div className="mt-3 text-sm text-zinc-200 space-y-3">
+            <div>
+              <p className="font-semibold">Controls and what they mean -</p>
+              <ol className="list-decimal ml-5 space-y-1">
+                <li><strong>Run / Pause:</strong> Starts or pauses the simulation timer and movement.</li>
+                <li><strong>ART ON/OFF:</strong>
+                  <ol className="list-[lower-alpha] ml-5 space-y-1 mt-1">
+                    <li><strong>ON:</strong> Active cells become latent; blocks viral entry/replication, no new infections and producers don’t release new virus.</li>
+                    <li><strong>OFF:</strong> Active Infected memory t-cells. infections proceed.</li>
+                  </ol>
+                </li>
+                <li><strong>Flush Free Virus:</strong> Clears free virus in the “blood” (viral load → 0) but doesn’t remove infected cells.</li>
+                <li><strong>Introduce Pathogen:</strong> Mimics a new infection that wakes up memory cells; latent cells can reactivate.</li>
+                <li><strong>+50 Virions:</strong> Adds 50 free virus particles, this represents either:
+                  <ol className="list-[lower-alpha] ml-5 space-y-1 mt-1">
+                    <li>infected memory T-cells releasing virus or</li>
+                    <li>new exposure entering the body (e.g., sharing needles with an infected person or sexual transmission).</li>
+                  </ol>
+                </li>
+              </ol>
+            </div>
+
+            <div>
+              <p className="font-semibold">Metrics -</p>
+              <ol className="list-decimal ml-5 space-y-1">
+                <li><strong>Healthy:</strong> number of uninfected memory T-cells.</li>
+                <li><strong>Dead memory t-cells:</strong> infected and dead cells </li>
+                <li><strong>Active/latent:</strong> cells currently active or latent (quiet).</li>
+                <li><strong>Free virus:</strong> “viral load / viral count” in this simplified visual.</li>
+              </ol>
+            </div>
+
             <p className="text-[11px] text-zinc-400 leading-snug">
-              This schematic visualization is not drawn to anatomical scale. Cell sizes, counts, and timing—including infection frequency—are intentionally
-              simplified for educational purposes and do not represent clinical infection rates, transmission probabilities, or treatment performance.
+              <strong>Note:</strong> This schematic visualization is not drawn to anatomical scale. Cell sizes, counts, and timing; including infection frequency are intentionally simplified for educational purposes and do not represent clinical infection rates, transmission probabilities, or treatment performance.
             </p>
           </div>
         </div>
       </section>
 
-      <footer className="text-[11px] text-zinc-500">v0.3 • Educational demo. Not medical advice.</footer>
+      <footer className="text-[11px] text-zinc-500">v0.3.2 • Educational demo. Not medical advice.</footer>
     </div>
   );
 }
