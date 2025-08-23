@@ -16,10 +16,7 @@ export default function HIVMemoryTCellGame() {
   const [artOn, setArtOn] = useState(false); // default ART OFF (toggle ON to suppress spread)
   const [showPathogenFX, setShowPathogenFX] = useState(false);
 
-  // Ensure ART is OFF on mount/HMR
-  useEffect(() => { setArtOn(false); }, []);
-
-  // Stopwatch (count-up) + infection throttle accumulator (for ART OFF)
+  // Stopwatch (count-up) + infection accumulator (drives ART-OFF infections)
   const [elapsedMs, setElapsedMs] = useState(0);
   const infectAccumRef = useRef(0);
 
@@ -43,14 +40,15 @@ export default function HIVMemoryTCellGame() {
   const [virions, setVirions] = useState(() => spawnVirions(100, worldW, worldH));
   const [tick, setTick] = useState(0);
 
-  // Simple loop (~320ms tick)
+  // Main loop (~320ms)
   useEffect(() => {
     if (!running) return;
     const id = setInterval(() => {
       setTick(t => t + 1);
-
-      // Stopwatch tick
       setElapsedMs(ms => ms + 320);
+
+      // Fill accumulator continuously; infections only fire when ART is OFF
+      infectAccumRef.current += 320;
 
       // 1) Virions drift
       setVirions(vs => moveVirions(vs, worldW, worldH));
@@ -62,9 +60,8 @@ export default function HIVMemoryTCellGame() {
         return produced > 0 ? vs.concat(spawnVirions(produced, worldW, worldH, /*centerBias=*/true, cells)) : vs;
       });
 
-      // 2b) Slowed spread when ART is OFF — batch infections every 2s.
-      // Infect 1 healthy cell every 2s + 1 extra per +100 virions.
-      infectAccumRef.current += 320;
+      // 3) ART OFF → infections happen in batches every 2 seconds:
+      //    infect 1 healthy + 1 more per +100 virions present.
       if (!artOn && infectAccumRef.current >= 2000) {
         const steps = Math.floor(infectAccumRef.current / 2000);
         infectAccumRef.current -= steps * 2000;
@@ -74,15 +71,15 @@ export default function HIVMemoryTCellGame() {
             const healthyIdx = [];
             for (let i = 0; i < next.length; i++) if (next[i].s === STATUS.HEALTHY) healthyIdx.push(i);
             if (!healthyIdx.length) return next;
-            const toInfect = Math.min(
-              healthyIdx.length,
-              1 + Math.floor((Array.isArray(virions) ? virions.length : 0) / 100)
-            );
+
+            const vCount = Array.isArray(virions) ? virions.length : 0;
+            const toInfect = Math.min(healthyIdx.length, 1 + Math.floor(vCount / 100));
+
             for (let k = 0; k < toInfect; k++) {
               if (!healthyIdx.length) break;
               const idx = healthyIdx.splice(Math.floor(Math.random() * healthyIdx.length), 1)[0];
               const c = next[idx];
-              const latent = Math.random() < 0.6; // most infections seed latent reservoir
+              const latent = Math.random() < 0.6; // mix of latent vs active
               next[idx] = { ...c, s: latent ? STATUS.LATENT : STATUS.ACTIVE };
             }
             return next;
@@ -90,15 +87,13 @@ export default function HIVMemoryTCellGame() {
         }
       }
 
-      // 3) ART ON: block entry + replication → NO new infections (not even latent)
-      if (artOn) {
-        // intentionally no infection logic when ART is ON
-      }
+      // 4) ART ON → block all new infections (no entry, no replication)
+      // (intentionally no infection logic when ART is ON)
 
-      // 4) Gentle decay of free virus
+      // 5) Gentle decay of free virus
       setVirions(vs => vs.filter((_, i) => i % 25 !== 0)); // drop ~4% each tick
 
-      // 5) Some active cells die naturally (very simplified)
+      // 6) Some active cells die naturally (very simplified)
       setCells(prev => prev.map(c => (c.s === STATUS.ACTIVE && Math.random() < 0.002) ? { ...c, s: STATUS.DEAD } : c));
     }, 320);
     return () => clearInterval(id);
@@ -119,7 +114,7 @@ export default function HIVMemoryTCellGame() {
     setShowPathogenFX(true);
     setTimeout(() => setShowPathogenFX(false), 800);
 
-    // Reactivate latent cells → active producers (education point about blips)
+    // Reactivate latent cells → active producers (educational blip)
     setCells(prev => prev.map(c => (c.s === STATUS.LATENT ? { ...c, s: STATUS.ACTIVE } : c)));
 
     // Small immediate boost in virions from newly reactivated cells (unless ART ON)
@@ -335,6 +330,7 @@ function dist(x1, y1, x2, y2) {
 }
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+
 
 
 
