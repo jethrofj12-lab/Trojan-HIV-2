@@ -50,15 +50,11 @@ export default function HIVMemoryTCellGame() {
       // Fill accumulator continuously; infections only fire when ART is OFF
       infectAccumRef.current += 320;
 
-      // 1) Virions drift
+      // 1) Virions drift (positions only)
       setVirions(vs => moveVirions(vs, worldW, worldH));
 
-      // 2) Active cells shed virus (suppressed by ART)
-      setVirions(vs => {
-        const activeCount = cells.filter(c => c.s === STATUS.ACTIVE).length;
-        const produced = artOn ? 0 : Math.min(40, Math.floor(activeCount * 1.5));
-        return produced > 0 ? vs.concat(spawnVirions(produced, worldW, worldH, /*centerBias=*/true, cells)) : vs;
-      });
+      // 2) No producer shedding at all → free virus doesn't auto-grow
+      setVirions(vs => vs);
 
       // 3) ART OFF → infections happen in batches every 2 seconds:
       //    infect 1 healthy + 1 more per +100 virions present.
@@ -90,8 +86,8 @@ export default function HIVMemoryTCellGame() {
       // 4) ART ON → block all new infections (no entry, no replication)
       // (intentionally no infection logic when ART is ON)
 
-      // 5) Gentle decay of free virus
-      setVirions(vs => vs.filter((_, i) => i % 25 !== 0)); // drop ~4% each tick
+      // 5) No passive decay either — free virus stays constant unless +50 or Flush is pressed
+      setVirions(vs => vs);
 
       // 6) Some active cells die naturally (very simplified)
       setCells(prev => prev.map(c => (c.s === STATUS.ACTIVE && Math.random() < 0.002) ? { ...c, s: STATUS.DEAD } : c));
@@ -117,8 +113,8 @@ export default function HIVMemoryTCellGame() {
     // Reactivate latent cells → active producers (educational blip)
     setCells(prev => prev.map(c => (c.s === STATUS.LATENT ? { ...c, s: STATUS.ACTIVE } : c)));
 
-    // Small immediate boost in virions from newly reactivated cells (unless ART ON)
-    setVirions(vs => artOn ? vs : vs.concat(spawnVirions(Math.min(60, latent * 2), worldW, worldH, true, cells)));
+    // No free-virus boost here (keeps viral load constant unless +50 is pressed)
+    setVirions(vs => vs);
   }
 
   // Manually introduce more free HIV virions
@@ -128,7 +124,7 @@ export default function HIVMemoryTCellGame() {
 
   function reset() {
     setCells(placeCells(cellCount, worldW, worldH));
-    setVirions(spawnVirions(100, worldW, worldH)); // keep 100 on reset too
+    setVirions(spawnVirions(100, worldW, worldH)); // reset back to 100
     setShowPathogenFX(false);
     setTick(0);
     setElapsedMs(0);                // stopwatch back to 0
@@ -196,7 +192,7 @@ export default function HIVMemoryTCellGame() {
           </div>
         </div>
 
-        {/* Controls + Story (updated text only) */}
+        {/* Controls + explanations + metrics */}
         <div className="rounded-3xl p-4 bg-zinc-900 shadow-inner flex flex-col gap-3">
           <h2 className="text-lg font-semibold">Play</h2>
           <div className="flex flex-wrap gap-2">
@@ -213,7 +209,6 @@ export default function HIVMemoryTCellGame() {
             <Metric label="Free virus" value={virions.length} />
           </div>
 
-          {/* >>> New explanatory text only <<< */}
           <div className="mt-3 text-sm text-zinc-200 space-y-3">
             <div>
               <p className="font-semibold">Controls and what they mean</p>
@@ -361,6 +356,7 @@ function dist(x1, y1, x2, y2) {
 }
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+
 
 
 
