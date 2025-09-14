@@ -2,14 +2,18 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * HIV Memory T-cell Game — Simple Visual
- * Updates:
+ * Rules:
  * • ACTIVE + LATENT each release +5 HIV virions every 10s (ART ON or OFF).
  * • When ART is OFF and an ACTIVE cell dies, it releases +50 HIV virions.
  * • Infections happen only when ART is OFF (every 2s: infect 1 + ⌊HIV/100⌋).
- * • Free virus (HIV) ONLY clears when ART is ON — faster (~12%/sec).
+ * • Free virus (HIV) ONLY clears when ART is ON — tuned to drop fast and “hover” around:
+ *    - ~40–100 by 2.5 minutes, ~40–50 by 5 minutes, ~20–40 by 10 minutes.
  * • “Introduce Pathogen” is a brief impact event (red flash) that boosts HIV by +1 per infected cell
  *   and reactivates LATENT → ACTIVE. No other pathogen is tracked.
- * • Metrics now show BOTH Active infected and Latent infected counts.
+ * • Metrics show BOTH Active infected and Latent infected counts.
+ * • ART toggle converts states globally:
+ *    - ART ON  ⇒ ALL ACTIVE → LATENT
+ *    - ART OFF ⇒ ALL LATENT → ACTIVE
  */
 
 const STATUS = {
@@ -50,13 +54,35 @@ export default function HIVMemoryTCellGame() {
   const DEATH_DELAY_MS = 30_000;                  // no deaths before 30s of being ACTIVE
   const DEATH_CHANCE_PER_TICK_AFTER_DELAY = 0.02; // chance per tick after delay, ART OFF only
 
-  // ART ON converts ACTIVE → LATENT (keeps trickle running from LATENT)
+  // Track ART-ON window to shape the clearance curve to the requested hover ranges
+  const artOnStartMsRef = useRef(null);
+  const v0AtOnRef = useRef(100);
+
+  // On ART toggle, convert states and track ART window
   useEffect(() => {
+    setCells(prev =>
+      prev.map(c => {
+        if (artOn) {
+          // ART ON ⇒ all ACTIVE become LATENT
+          return c.s === STATUS.ACTIVE ? { ...c, s: STATUS.LATENT, ageMs: 0 } : c;
+        } else {
+          // ART OFF ⇒ all LATENT become ACTIVE
+          return c.s === STATUS.LATENT ? { ...c, s: STATUS.ACTIVE, ageMs: 0 } : c;
+        }
+      })
+    );
+
     if (artOn) {
-      setCells(prev =>
-        prev.map(c => (c.s === STATUS.ACTIVE ? { ...c, s: STATUS.LATENT, ageMs: 0 } : c))
-      );
+      // Start ART window + record current load for shaping the cap
+      artOnStartMsRef.current = elapsedMs;
+      setVirions(v => {
+        v0AtOnRef.current = v.length;
+        return v;
+      });
+    } else {
+      artOnStartMsRef.current = null;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [artOn]);
 
   // Main sim loop
@@ -128,15 +154,30 @@ export default function HIVMemoryTCellGame() {
       setVirions(prev => {
         let vs = prev;
 
-        // 4a) Clearance ONLY when ART ON — faster now (~12%/sec)
+        // 4a) Clearance ONLY when ART ON — shaped to meet hover ranges
         if (artOn && clearAccumRef.current >= 1000) {
           const sec = Math.floor(clearAccumRef.current / 1000);
           clearAccumRef.current -= sec * 1000;
-          const remove = Math.max(sec, Math.floor(vs.length * 0.12 * sec)); // at least 1/sec if any
-          if (remove > 0 && vs.length > 0) {
-            const keep = Math.max(0, vs.length - remove);
-            vs = vs.slice(0, keep);
-          }
+
+          // Time since ART ON (ms)
+          const artStart = artOnStartMsRef.current ?? elapsedMs;
+          const tMs = (elapsedMs + TICK_MS) - artStart;
+          const cap = artUpperCapMs(tMs, v0AtOnRef.current);
+
+          // Aggressive proportional decay early, gentler later
+          const current = vs.length;
+          let rate = current > 150 ? 0.28 : current > 80 ? 0.18 : 0.10; // per second
+          let removeBase = Math.floor(current * rate * sec);
+          if (removeBase < sec && current > 0) removeBase = sec; // at least 1/sec if any
+
+          let afterBase = Math.max(0, current - removeBase);
+
+          // Enforce a moving upper cap with a little wiggle so it "hovers"
+          const wiggle = cap > 50 ? 10 : cap > 40 ? 6 : 4; // allow some visual fluctuation
+          const upper = Math.max(0, Math.ceil(cap + wiggle));
+          const keep = Math.min(afterBase, upper);
+
+          vs = vs.slice(0, keep);
         }
 
         // 4b) Trickle: spawn 5 * releases near each infected cell that ticked
@@ -199,7 +240,7 @@ export default function HIVMemoryTCellGame() {
       setVirions(vs => vs.concat(spawnVirions(boost, worldW, worldH, true, cells)));
     }
 
-    // Reactivate latent cells
+    // Reactivate latent cells to ACTIVE (impact/immune activation)
     setCells(prev => prev.map(c => (c.s === STATUS.LATENT ? { ...c, s: STATUS.ACTIVE, ageMs: 0 } : c)));
   }
 
@@ -218,6 +259,8 @@ export default function HIVMemoryTCellGame() {
     setImpactBlobs([]);
     setArtOn(false);
     setRunning(false);
+    artOnStartMsRef.current = null;
+    v0AtOnRef.current = 100;
   }
 
   return (
@@ -315,8 +358,8 @@ export default function HIVMemoryTCellGame() {
                 <li>
                   <b>ART ON/OFF:</b>
                   <ul className="list-disc list-inside ml-5">
-                    <li><b>ON:</b> blocks viral entry/replication → no new infections; HIV clears faster over time.</li>
-                    <li><b>OFF:</b> infections proceed; no clearance.</li>
+                    <li><b>ON:</b> ALL ACTIVE → LATENT; no new infections; HIV clears quickly then levels to low range.</li>
+                    <li><b>OFF:</b> ALL LATENT → ACTIVE; infections proceed; no clearance.</li>
                   </ul>
                 </li>
                 <li><b>Flush Free Virus:</b> Clears free HIV in the “blood” (viral load = 0) but doesn’t remove infected cells.</li>
@@ -369,6 +412,28 @@ function formatTime(ms) {
   const m = Math.floor(s / 60);
   const ss = String(s % 60).padStart(2, "0");
   return `${m}:${ss}`;
+}
+
+// Moving upper-cap for HIV under ART ON to match the requested “hover” ranges.
+function artUpperCapMs(tMs, v0) {
+  // t in seconds
+  const t = Math.max(0, tMs / 1000);
+  // Phase A (0–150s): drop toward ≤100 from initial load
+  if (t <= 150) {
+    const start = Math.max(v0 || 100, 100);
+    // linear to 100 by 150s
+    return Math.max(100, start - ((start - 100) * (t / 150)));
+  }
+  // Phase B (150–300s): go from 100 down to 50
+  if (t <= 300) {
+    return 100 - ((t - 150) * (50 / 150));
+  }
+  // Phase C (300–600s): go from 50 down to 40
+  if (t <= 600) {
+    return 50 - ((t - 300) * (10 / 300));
+  }
+  // After 10 minutes, hold ~40 as an upper cap
+  return 40;
 }
 
 function placeCells(n, w, h) {
