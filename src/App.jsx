@@ -2,18 +2,21 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * HIV Memory T-cell Game — Simple Visual
- * Rules:
+ * Rules intact:
  * • ACTIVE + LATENT each release +5 HIV virions every 10s (ART ON or OFF).
  * • When ART is OFF and an ACTIVE cell dies, it releases +50 HIV virions.
  * • Infections happen only when ART is OFF (every 2s: infect 1 + ⌊HIV/100⌋).
- * • Free virus (HIV) ONLY clears when ART is ON — tuned to drop fast and “hover” around:
- *    - ~40–100 by 2.5 minutes, ~40–50 by 5 minutes, ~20–40 by 10 minutes.
- * • “Introduce Pathogen” is a brief impact event (red flash) that boosts HIV by +1 per infected cell
- *   and reactivates LATENT → ACTIVE. No other pathogen is tracked.
- * • Metrics show BOTH Active infected and Latent infected counts.
+ * • “Introduce Pathogen” = brief red-flash impact that adds +1 HIV per infected cell and reactivates LATENT → ACTIVE.
+ * • Metrics show Active and Latent separately.
  * • ART toggle converts states globally:
  *    - ART ON  ⇒ ALL ACTIVE → LATENT
  *    - ART OFF ⇒ ALL LATENT → ACTIVE
+ *
+ * NEW tuning (per your spec):
+ * • Under ART ON, free virus drops fast but not instant:
+ *    – Roughly ~500 every ~20–30s at high loads (slope limited).
+ *    – No huge “one-second” plunge from very high loads.
+ *    – As load gets small, it approaches a low hover (<~50).
  */
 
 const STATUS = {
@@ -54,11 +57,10 @@ export default function HIVMemoryTCellGame() {
   const DEATH_DELAY_MS = 30_000;                  // no deaths before 30s of being ACTIVE
   const DEATH_CHANCE_PER_TICK_AFTER_DELAY = 0.02; // chance per tick after delay, ART OFF only
 
-  // Track ART-ON window to shape the clearance curve to the requested hover ranges
+  // Track ART windows
   const artOnStartMsRef = useRef(null);
-  const v0AtOnRef = useRef(100);
 
-  // On ART toggle, convert states and track ART window
+  // On ART toggle, convert states and mark window start/stop
   useEffect(() => {
     setCells(prev =>
       prev.map(c => {
@@ -71,17 +73,7 @@ export default function HIVMemoryTCellGame() {
         }
       })
     );
-
-    if (artOn) {
-      // Start ART window + record current load for shaping the cap
-      artOnStartMsRef.current = elapsedMs;
-      setVirions(v => {
-        v0AtOnRef.current = v.length;
-        return v;
-      });
-    } else {
-      artOnStartMsRef.current = null;
-    }
+    artOnStartMsRef.current = artOn ? elapsedMs : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [artOn]);
 
@@ -154,30 +146,50 @@ export default function HIVMemoryTCellGame() {
       setVirions(prev => {
         let vs = prev;
 
-        // 4a) Clearance ONLY when ART ON — shaped to meet hover ranges
+        // 4a) Clearance ONLY when ART ON — slope-limited, no instant cliff
         if (artOn && clearAccumRef.current >= 1000) {
           const sec = Math.floor(clearAccumRef.current / 1000);
           clearAccumRef.current -= sec * 1000;
 
-          // Time since ART ON (ms)
-          const artStart = artOnStartMsRef.current ?? elapsedMs;
-          const tMs = (elapsedMs + TICK_MS) - artStart;
-          const cap = artUpperCapMs(tMs, v0AtOnRef.current);
-
-          // Aggressive proportional decay early, gentler later
           const current = vs.length;
-          let rate = current > 150 ? 0.28 : current > 80 ? 0.18 : 0.10; // per second
-          let removeBase = Math.floor(current * rate * sec);
-          if (removeBase < sec && current > 0) removeBase = sec; // at least 1/sec if any
+          const tOn = artOnStartMsRef.current == null ? 0 : Math.max(0, (elapsedMs + TICK_MS) - artOnStartMsRef.current);
+          const tSec = tOn / 1000;
 
-          let afterBase = Math.max(0, current - removeBase);
+          // Base slope by load (virions removed per second)
+          // ~500 per 20–30s when high; gentler as it falls
+          let perSec =
+            current > 2500 ? 26 :
+            current > 2000 ? 25 :
+            current > 1500 ? 24 :
+            current > 1000 ? 22 :
+            current > 600  ? 20 :
+            current > 400  ? 18 :
+            current > 200  ? 16 :
+            current > 100  ? 12 :
+            current > 50   ? 8  :
+            2;
 
-          // Enforce a moving upper cap with a little wiggle so it "hovers"
-          const wiggle = cap > 50 ? 10 : cap > 40 ? 6 : 4; // allow some visual fluctuation
-          const upper = Math.max(0, Math.ceil(cap + wiggle));
-          const keep = Math.min(afterBase, upper);
+          // After ~60s on ART, encourage drop into the <50 hover band,
+          // but still respect proportional cap to avoid sudden cliffs.
+          if (tSec >= 60 && current > 60) {
+            perSec = Math.max(perSec, 30); // push down a bit faster once we're late
+          }
 
-          vs = vs.slice(0, keep);
+          // Proportional cap: never remove more than 10% of current per second
+          const maxProp = Math.floor(current * 0.10 * sec);
+          let remove = perSec * sec;
+          if (maxProp > 0) remove = Math.min(remove, maxProp);
+          remove = Math.max(0, Math.min(remove, current));
+
+          let after = current - remove;
+
+          // Tiny hover around ~40–60 when already low
+          if (after < 60 && tSec >= 60) {
+            const target = 45 + Math.floor(5 * Math.sin(tSec / 5)); // ≈40–50–ish wobble
+            after = Math.max(0, Math.min(after, target));
+          }
+
+          vs = vs.slice(0, after);
         }
 
         // 4b) Trickle: spawn 5 * releases near each infected cell that ticked
@@ -235,7 +247,7 @@ export default function HIVMemoryTCellGame() {
 
     // Boost HIV by +1 × (# infected cells)
     const infectedCount = active + latent;
-    const boost = Math.max(0, infectedCount) * 1;
+    const boost = Math.max(0, infectedCount);
     if (boost > 0) {
       setVirions(vs => vs.concat(spawnVirions(boost, worldW, worldH, true, cells)));
     }
@@ -260,7 +272,6 @@ export default function HIVMemoryTCellGame() {
     setArtOn(false);
     setRunning(false);
     artOnStartMsRef.current = null;
-    v0AtOnRef.current = 100;
   }
 
   return (
@@ -358,7 +369,7 @@ export default function HIVMemoryTCellGame() {
                 <li>
                   <b>ART ON/OFF:</b>
                   <ul className="list-disc list-inside ml-5">
-                    <li><b>ON:</b> ALL ACTIVE → LATENT; no new infections; HIV clears quickly then levels to low range.</li>
+                    <li><b>ON:</b> ALL ACTIVE → LATENT; no new infections; HIV clears quickly but smoothly (no instant cliff), trending to a low hover.</li>
                     <li><b>OFF:</b> ALL LATENT → ACTIVE; infections proceed; no clearance.</li>
                   </ul>
                 </li>
@@ -412,28 +423,6 @@ function formatTime(ms) {
   const m = Math.floor(s / 60);
   const ss = String(s % 60).padStart(2, "0");
   return `${m}:${ss}`;
-}
-
-// Moving upper-cap for HIV under ART ON to match the requested “hover” ranges.
-function artUpperCapMs(tMs, v0) {
-  // t in seconds
-  const t = Math.max(0, tMs / 1000);
-  // Phase A (0–150s): drop toward ≤100 from initial load
-  if (t <= 150) {
-    const start = Math.max(v0 || 100, 100);
-    // linear to 100 by 150s
-    return Math.max(100, start - ((start - 100) * (t / 150)));
-  }
-  // Phase B (150–300s): go from 100 down to 50
-  if (t <= 300) {
-    return 100 - ((t - 150) * (50 / 150));
-  }
-  // Phase C (300–600s): go from 50 down to 40
-  if (t <= 600) {
-    return 50 - ((t - 300) * (10 / 300));
-  }
-  // After 10 minutes, hold ~40 as an upper cap
-  return 40;
 }
 
 function placeCells(n, w, h) {
