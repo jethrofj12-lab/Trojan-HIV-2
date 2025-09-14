@@ -2,50 +2,45 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * HIV Memory T-cell Game — Simple Visual
- * - Active cells drip 5 virions every 10 seconds
- * - When an ACTIVE cell dies, it releases 50 virions
- * - ART ON: ACTIVE -> LATENT (no trickle while latent)
- * - Infection cadence (ART OFF): every 2s infect 1 healthy + 1 per +100 virions
+ * Changes requested:
+ * - ACTIVE and LATENT cells each release 5 virions every 10 seconds (ART ON or OFF).
+ * - When ART is OFF, an ACTIVE cell that dies releases 50 virions.
  */
 
 const STATUS = {
   HEALTHY: "HEALTHY",
-  LATENT: "LATENT", // internal; not drawn distinctly in metrics (we show together with ACTIVE if desired)
+  LATENT: "LATENT",
   ACTIVE: "ACTIVE",
   DEAD: "DEAD",
 };
 
 export default function HIVMemoryTCellGame() {
-  // --- Simulation toggles/state ---
+  // --- Sim state ---
   const [running, setRunning] = useState(false);
   const [artOn, setArtOn] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [tick, setTick] = useState(0);
+  const infectAccumRef = useRef(0);
 
   // --- World & population ---
   const worldW = 960;
   const worldH = 600;
   const cellCount = 1000;
 
-  // Place cells in a jittered grid for performance and visual distribution
   const initialCells = useMemo(() => placeCells(cellCount, worldW, worldH), []);
   const [cells, setCells] = useState(initialCells);
 
-  // Virions: start at 100
+  // Virions start at 100
   const [virions, setVirions] = useState(() => spawnVirions(100, worldW, worldH));
 
-  // Infection cadence accumulator (ART OFF)
-  const infectAccumRef = useRef(0);
+  // Death timing for ACTIVE cells (strong lag, then small chance per tick)
+  const DEATH_DELAY_MS = 30_000; // 30s
+  const DEATH_CHANCE_PER_TICK_AFTER_DELAY = 0.02; // per ~320ms tick
 
-  // Death timing: ACTIVE cells can only die after this delay; then a small chance per tick
-  const DEATH_DELAY_MS = 30_000; // 30s lag
-  const DEATH_CHANCE_PER_TICK_AFTER_DELAY = 0.02; // 2% per tick (~320ms)
-
-  // When ART turns ON, convert ACTIVE -> LATENT and reset their trickle timers
+  // When ART turns ON, convert ACTIVE -> LATENT (keep trickle behavior running for LATENT too)
   useEffect(() => {
     if (artOn) {
       setCells(prev =>
-        prev.map(c => (c.s === STATUS.ACTIVE ? { ...c, s: STATUS.LATENT, ageMs: 0, relMs: 0 } : c))
+        prev.map(c => (c.s === STATUS.ACTIVE ? { ...c, s: STATUS.LATENT, ageMs: 0 } : c))
       );
     }
   }, [artOn]);
@@ -54,15 +49,14 @@ export default function HIVMemoryTCellGame() {
   useEffect(() => {
     if (!running) return;
     const id = setInterval(() => {
-      setTick(t => t + 1);
       setElapsedMs(ms => ms + 320);
       infectAccumRef.current += 320;
 
-      // 1) Virions drift (positions only)
+      // 1) Virions drift
       setVirions(vs => moveVirions(vs, worldW, worldH));
 
-      // 2) ART OFF → infections happen in batches every 2 seconds:
-      //    infect 1 healthy + 1 more per +100 virions present.
+      // 2) ART OFF → infections every 2 seconds:
+      //    infect 1 healthy + 1 more per +100 virions
       if (!artOn && infectAccumRef.current >= 2000) {
         const steps = Math.floor(infectAccumRef.current / 2000);
         infectAccumRef.current -= steps * 2000;
@@ -81,44 +75,55 @@ export default function HIVMemoryTCellGame() {
               if (!healthyIdx.length) break;
               const idx = healthyIdx.splice(Math.floor(Math.random() * healthyIdx.length), 1)[0];
               const c = next[idx];
-              // become ACTIVE immediately (no visible latent on infection)
-              next[idx] = { ...c, s: STATUS.ACTIVE, ageMs: 0, relMs: 0 }; // relMs starts trickle timer
+              next[idx] = { ...c, s: STATUS.ACTIVE, ageMs: 0, relMs: 0 }; // relMs = trickle timer
             }
             return next;
           });
         }
       }
 
-      // 3) Active cells trickle release + age + handle deaths (with lag)
+      // 3) Trickle release (ACTIVE and LATENT) + ACTIVE aging/death
       const trickleSpawns = [];
       const deathSpawns = [];
+
       setCells(prev =>
         prev.map(c => {
-          if (c.s !== STATUS.ACTIVE) return c;
-
-          // accumulate trickle timer; every 10s release 5 virions
-          const rel = (c.relMs ?? 0) + 320;
-          let releases = Math.floor(rel / 10_000); // 10s
-          if (releases > 0) {
-            for (let i = 0; i < releases; i++) {
-              trickleSpawns.push({ x: c.x, y: c.y, n: 5 });
+          // Trickle: both ACTIVE and LATENT release 5 virions every 10s
+          if (c.s === STATUS.ACTIVE || c.s === STATUS.LATENT) {
+            const rel = (c.relMs ?? 0) + 320;
+            let releases = Math.floor(rel / 10_000); // every 10s
+            if (releases > 0) {
+              for (let i = 0; i < releases; i++) {
+                trickleSpawns.push({ x: c.x, y: c.y, n: 5 });
+              }
             }
-          }
-          const relMs = rel - releases * 10_000;
+            const relMs = rel - releases * 10_000;
 
-          // age and possible death (after strong lag)
-          const age = (c.ageMs ?? 0) + 320;
-          if (age >= DEATH_DELAY_MS && Math.random() < DEATH_CHANCE_PER_TICK_AFTER_DELAY) {
-            // death burst of 50 virions at the cell location
-            deathSpawns.push({ x: c.x, y: c.y, n: 50 });
-            return { ...c, s: STATUS.DEAD, ageMs: 0, relMs: 0 };
+            // ACTIVE can age and possibly die (only matters if still ACTIVE)
+            if (c.s === STATUS.ACTIVE) {
+              const age = (c.ageMs ?? 0) + 320;
+              if (
+                !artOn && // death burst only when ART is OFF
+                age >= DEATH_DELAY_MS &&
+                Math.random() < DEATH_CHANCE_PER_TICK_AFTER_DELAY
+              ) {
+                // death burst of 50 virions at the cell location
+                deathSpawns.push({ x: c.x, y: c.y, n: 50 });
+                return { ...c, s: STATUS.DEAD, ageMs: 0, relMs: 0 };
+              }
+              return { ...c, ageMs: age, relMs };
+            }
+
+            // LATENT: keep accumulating relMs
+            return { ...c, relMs };
           }
 
-          return { ...c, ageMs: age, relMs };
+          // DEAD or HEALTHY: unchanged
+          return c;
         })
       );
 
-      // After updating cells, add any spawned virions near their source
+      // Add spawned virions near their sources
       if (trickleSpawns.length || deathSpawns.length) {
         const add = [];
         for (const { x, y, n } of trickleSpawns) {
@@ -127,9 +132,7 @@ export default function HIVMemoryTCellGame() {
         for (const { x, y, n } of deathSpawns) {
           add.push(...spawnVirions(n, worldW, worldH, true, [{ x, y }]));
         }
-        if (add.length) {
-          setVirions(vs => vs.concat(add));
-        }
+        if (add.length) setVirions(vs => vs.concat(add));
       }
     }, 320);
 
@@ -137,15 +140,13 @@ export default function HIVMemoryTCellGame() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, artOn, cells, virions]);
 
-  // Derived counts (you can choose to display latent separately if you want)
+  // Derived metrics
   const healthy = cells.filter(c => c.s === STATUS.HEALTHY).length;
-  const active = cells.filter(c => c.s === STATUS.ACTIVE).length;
-  const latent = cells.filter(c => c.s === STATUS.LATENT).length;
-  const activeLatent = active + latent;
   const dead = cells.filter(c => c.s === STATUS.DEAD).length;
+  const active = cells.filter(c => c.s === STATUS.ACTIVE).length;
   const freeVirus = Array.isArray(virions) ? virions.length : 0;
 
-  // UI handlers
+  // --- Controls ---
   function flushFreeVirus() {
     setVirions([]);
   }
@@ -155,7 +156,7 @@ export default function HIVMemoryTCellGame() {
     const PATHOGEN_VIRUS_BOOST = 100;
     setVirions(vs => vs.concat(spawnVirions(PATHOGEN_VIRUS_BOOST, worldW, worldH, true, cells)));
     setCells(prev =>
-      prev.map(c => (c.s === STATUS.LATENT ? { ...c, s: STATUS.ACTIVE, ageMs: 0, relMs: 0 } : c))
+      prev.map(c => (c.s === STATUS.LATENT ? { ...c, s: STATUS.ACTIVE, ageMs: 0 } : c))
     );
   }
 
@@ -165,8 +166,7 @@ export default function HIVMemoryTCellGame() {
 
   function reset() {
     setCells(placeCells(cellCount, worldW, worldH));
-    setVirions(spawnVirions(100, worldW, worldH)); // reset back to 100
-    setTick(0);
+    setVirions(spawnVirions(100, worldW, worldH));
     setElapsedMs(0);
     infectAccumRef.current = 0;
     setArtOn(false);
@@ -186,9 +186,7 @@ export default function HIVMemoryTCellGame() {
           >
             {running ? "Pause" : "Run"}
           </button>
-          <button onClick={reset} className="px-3 py-2 rounded-2xl bg-zinc-700">
-            Reset
-          </button>
+          <button onClick={reset} className="px-3 py-2 rounded-2xl bg-zinc-700">Reset</button>
         </div>
       </header>
 
@@ -207,13 +205,11 @@ export default function HIVMemoryTCellGame() {
             {/* Cells */}
             <g>
               {cells.map((c, i) => {
-                let fill = "#22c55e"; // healthy = green
+                let fill = "#22c55e"; // healthy -> green
                 let stroke = "transparent";
                 if (c.s === STATUS.ACTIVE) fill = "#ef4444"; // red
-                else if (c.s === STATUS.LATENT) {
-                  fill = "#f59e0b"; // amber
-                  stroke = "#fde68a";
-                } else if (c.s === STATUS.DEAD) fill = "#6b7280"; // gray
+                else if (c.s === STATUS.LATENT) { fill = "#f59e0b"; stroke = "#fde68a"; } // amber
+                else if (c.s === STATUS.DEAD) fill = "#6b7280"; // gray
 
                 return (
                   <circle
@@ -232,8 +228,9 @@ export default function HIVMemoryTCellGame() {
           </svg>
         </div>
 
-        {/* Controls & Metrics */}
+        {/* Controls, Instructions, Metrics */}
         <div className="col-span-1 flex flex-col gap-4">
+          {/* Controls */}
           <div className="rounded-3xl bg-zinc-900 p-4">
             <h2 className="text-lg font-semibold mb-2">Controls</h2>
             <div className="flex flex-wrap gap-2">
@@ -253,44 +250,51 @@ export default function HIVMemoryTCellGame() {
                 +50 Virions
               </button>
             </div>
-            <p className="text-xs text-zinc-400 mt-2">
-              ART ON: ACTIVE → LATENT; latent cells don’t trickle virus.
-            </p>
+
+            {/* Instructions (as requested) */}
+            <div className="mt-3 text-sm text-zinc-300 space-y-2">
+              <ol className="list-decimal list-inside space-y-1">
+                <li><b>Run / Pause:</b> Starts or pauses the simulation timer and movement.</li>
+                <li>
+                  <b>ART ON/OFF:</b>
+                  <ul className="list-disc list-inside ml-5">
+                    <li><b>ON:</b> blocks viral entry/replication → no new infections</li>
+                    <li><b>OFF:</b> infections proceed</li>
+                  </ul>
+                </li>
+                <li><b>Flush Free Virus:</b> Clears free virus in the “blood” (viral load = 0) but doesn’t remove infected cells.</li>
+                <li><b>Introduce Pathogen:</b> Mimics a new infection that wakes up memory cells; latent cells can reactivate.</li>
+                <li>
+                  <b>+50 Virions:</b> Adds 50 free virus particles, representing either:
+                  <ul className="list-disc list-inside ml-5">
+                    <li>infected memory T-cells releasing virus, or</li>
+                    <li>new exposure entering the body (e.g., sharing needles or sexual transmission).</li>
+                  </ul>
+                </li>
+              </ol>
+            </div>
           </div>
 
+          {/* Metrics */}
           <div className="rounded-3xl bg-zinc-900 p-4">
             <h2 className="text-lg font-semibold mb-2">Metrics</h2>
             <ul className="grid grid-cols-2 gap-2 text-sm">
-              <li className="flex justify-between">
-                <span>Healthy</span>
-                <span className="font-mono">{healthy}</span>
-              </li>
-              <li className="flex justify-between">
-                <span>Active infected</span>
-                <span className="font-mono">{active}</span>
-              </li>
-              <li className="flex justify-between">
-                <span>Latent</span>
-                <span className="font-mono">{latent}</span>
-              </li>
-              <li className="flex justify-between">
-                <span>Dead memory T-cells</span>
-                <span className="font-mono">{dead}</span>
-              </li>
-              <li className="flex justify-between col-span-2">
-                <span>Free virus</span>
-                <span className="font-mono">{freeVirus}</span>
-              </li>
+              <li className="flex justify-between"><span>Healthy</span><span className="font-mono">{healthy}</span></li>
+              <li className="flex justify-between"><span>Dead memory t-cells</span><span className="font-mono">{dead}</span></li>
+              <li className="flex justify-between"><span>Active infected</span><span className="font-mono">{active}</span></li>
+              <li className="flex justify-between col-span-2"><span>Free virus</span><span className="font-mono">{freeVirus}</span></li>
             </ul>
-          </div>
 
-          <div className="rounded-3xl bg-zinc-900 p-4">
-            <h2 className="text-lg font-semibold mb-2">Notes</h2>
-            <ul className="list-disc list-inside text-sm text-zinc-300 space-y-1">
-              <li>Active cells drip 5 virions / 10s.</li>
-              <li>Death releases 50 virions at the cell’s location.</li>
-              <li>ART suppresses new infections and converts ACTIVE → LATENT.</li>
-            </ul>
+            {/* Metric descriptions (as requested) */}
+            <div className="mt-3 text-xs text-zinc-400 space-y-1">
+              <p><b>Healthy:</b> number of uninfected memory T-cells.</p>
+              <p><b>Dead memory t-cells:</b> infected and dead cells.</p>
+              <p><b>Active infected:</b> cells currently making virus (producers).</p>
+              <p><b>Free virus:</b> “viral load / viral count” in this simplified visual.</p>
+              <p className="mt-2">
+                <b>Note:</b> This schematic visualization is not drawn to anatomical scale. Cell sizes, counts, and timing (including infection frequency) are intentionally simplified for educational purposes and do not represent clinical infection rates, transmission probabilities, or treatment performance.
+              </p>
+            </div>
           </div>
         </div>
       </section>
@@ -298,7 +302,7 @@ export default function HIVMemoryTCellGame() {
   );
 }
 
-/* -------------------------- helpers -------------------------- */
+/* --------------------------- Helpers --------------------------- */
 
 function formatTime(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -308,7 +312,7 @@ function formatTime(ms) {
 }
 
 function placeCells(n, w, h) {
-  // Jittered grid for big n (fast + even)
+  // Jittered grid for large n (even spread, fast)
   if (n > 200) {
     const cols = Math.ceil(Math.sqrt((n * w) / h));
     const rows = Math.ceil(n / cols);
@@ -339,7 +343,7 @@ function placeCells(n, w, h) {
 }
 
 function spawnVirions(n, w, h, centerBias = false, centers = []) {
-  // centers: optional array of {x,y} to bias spawning near
+  // If centerBias and centers provided, spawn near those points (e.g., a cell)
   const vs = [];
   for (let i = 0; i < n; i++) {
     let x, y;
@@ -374,7 +378,8 @@ function moveVirions(vs, w, h) {
     // slight random drift
     vx += (Math.random() - 0.5) * 0.1;
     vy += (Math.random() - 0.5) * 0.1;
-    // clamp speeds
+
+    // clamp speed
     const speed = Math.hypot(vx, vy);
     const maxS = 1.6;
     if (speed > maxS) {
