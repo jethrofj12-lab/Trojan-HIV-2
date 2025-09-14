@@ -14,16 +14,14 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  *    - ART ON  ⇒ ALL ACTIVE → LATENT
  *    - ART OFF ⇒ ALL LATENT → ACTIVE
  *
- * Fix for “ART looks like flush” + Scenario targets:
- * • Per tick order: (1) Additions (trickle, bursts, buttons) → (2) Clearance (ART) with fractional carry
- *   and strict per-tick dt (no backlog) → (3) Time-based envelope clamp.
- * • Clearance model (ART ON): r_per_sec = min(γ·V, α·V + β·I), with α=0.01, β=0.45, γ=0.08.
- *   Uses a fractional accumulator so small rates still remove over time.
- * • Per-tick drop guard: ≤2.5% of V per tick (prevents one-frame cliffs).
- * • Envelope (ART ON) ensures:
- *     ~100→50 by 60s, 50→30 by 120s, then 30→~25 by 10 min (with tiny wiggle).
- *   This matches: start at 100 with ART ON ⇒ ~40–50 at ~1 min; ~20–30 by ~2 min,
- *   and stays low even if you tap +50 or Introduce Pathogen (it will spike but get pulled back down).
+ * Smoothing so ART never “flushes”:
+ * • Additions (trickle, bursts, buttons) happen first each tick.
+ * • Clearance (ART) is dt-based with fractional carry (no backlog batching).
+ * • Clearance rate per sec: r_sec = min( γ·V , α·V + β·I + κ·max(0, V - cap(t, v0)) ).
+ *   - α=0.008, β=0.50, γ=0.06, κ=0.04 (scale-free; strong but gradual).
+ * • Per-tick drop guard: ≤1.8% of V per tick (≈5.6%/s) so you see it step down, not cliff.
+ * • cap(t, v0) starts at the viral load when ART turns ON and glides down:
+ *    v0→100 over 0–150s, 100→50 over 150–300s, 50→30 over 300–600s, then ~25 thereafter.
  */
 
 const STATUS = {
@@ -87,7 +85,7 @@ export default function HIVMemoryTCellGame() {
     if (artOn) {
       artOnStartMsRef.current = elapsedMs;
       setVirions(v => {
-        v0AtOnRef.current = v.length || 0;
+        v0AtOnRef.current = v.length || 0; // capture starting load for the envelope
         return v;
       });
       clearCarryRef.current = 0; // reset fractional carry on mode switch
@@ -164,7 +162,7 @@ export default function HIVMemoryTCellGame() {
       );
 
       // 4) Apply virion updates in one setState:
-      //    (A) Add trickle/bursts/buttons, (B) ART clearance with carry, (C) envelope clamp
+      //    (A) Add trickle/bursts/buttons, (B) ART clearance with carry (NO hard clamp)
       setVirions(prev => {
         let vs = prev;
 
@@ -186,22 +184,35 @@ export default function HIVMemoryTCellGame() {
           if (adds.length) vs = vs.concat(adds);
         }
 
-        // (B) CLEARANCE (ART ON) — dt-based with fractional carry + per-tick guard
+        // (B) CLEARANCE (ART ON) — dt-based, fractional carry, soft envelope (no hard slice)
         if (artOn) {
           const V = vs.length;
           const I = infectedApprox;
 
-          const alpha = 0.01; // V-driven removal (per second)
-          const beta  = 0.45; // I-driven removal (per infected per second)
-          const gamma = 0.08; // absolute cap: ≤8% of V per second
+          // parameters tuned for scale-free behavior
+          const alpha = 0.008; // V-driven removal (per second)
+          const beta  = 0.50;  // I-driven removal (per infected per second)
+          const gamma = 0.06;  // absolute cap: ≤6% of V per second
+          const kappa = 0.04;  // extra pull when above time-curve cap
+          const TAU_TICK = 0.018; // ≤1.8% of V per tick (visual drop guard)
 
-          const rPerSec = Math.min(gamma * V, alpha * V + beta * I); // no rounding
+          // time since ART ON + soft cap starting at v0
+          const tMs = (artOnStartMsRef.current == null) ? 0 : (elapsedMs + TICK_MS) - artOnStartMsRef.current;
+          const cap = artSoftCapMs(tMs, v0AtOnRef.current || V);
+
+          // per-second clearance target (no rounding)
+          const rPerSec = Math.min(
+            gamma * V,
+            alpha * V + beta * I + kappa * Math.max(0, V - cap)
+          );
+
+          // apply dt with fractional carry
           let removedFloat = rPerSec * DT + clearCarryRef.current;
           let remove = Math.floor(removedFloat);
           clearCarryRef.current = removedFloat - remove;
 
-          // Per-tick drop guard (≤2.5% of current)
-          const maxPerTick = Math.floor(V * 0.025);
+          // Per-tick drop guard
+          const maxPerTick = Math.floor(V * TAU_TICK);
           if (maxPerTick > 0) remove = Math.min(remove, maxPerTick);
 
           remove = Math.max(0, Math.min(remove, V));
@@ -211,15 +222,7 @@ export default function HIVMemoryTCellGame() {
           clearCarryRef.current = 0;
         }
 
-        // (C) FINAL ENVELOPE CLAMP (only when ART ON)
-        if (artOn && artOnStartMsRef.current != null) {
-          const tMs = (elapsedMs + TICK_MS) - artOnStartMsRef.current;
-          const cap = artUpperCapMs(tMs);
-          const wiggle = cap > 50 ? 10 : cap > 30 ? 6 : 4; // small visual wobble
-          const upper = Math.max(0, Math.ceil(cap + wiggle));
-          if (vs.length > upper) vs = vs.slice(0, upper);
-        }
-
+        // Note: NO final hard clamp to the cap. The cap only influences the clearance rate.
         return vs;
       });
     }, TICK_MS);
@@ -433,13 +436,23 @@ function formatTime(ms) {
   return `${m}:${ss}`;
 }
 
-// ART envelope cap (upper bound) over time since ART ON.
-// 0–60s: 100 → 50, 60–120s: 50 → 30, 120–600s: 30 → 25, then hold ~25.
-function artUpperCapMs(tMs) {
+// Soft time-curve cap (upper target) starting at v0 when ART turns ON.
+// 0–150s: v0 → 100, 150–300s: 100 → 50, 300–600s: 50 → 30, then ~25.
+function artSoftCapMs(tMs, v0) {
   const t = Math.max(0, tMs / 1000); // seconds since ART ON
-  if (t <= 60)   return 100 - (50 * (t / 60));                 // 100 → 50
-  if (t <= 120)  return 50   - (20 * ((t - 60) / 60));         // 50 → 30
-  if (t <= 600)  return 30   - (5  * ((t - 120) / 480));       // 30 → 25
+  const start = Math.max(0, v0 || 0);
+  if (t <= 150) {
+    // linear from start (v0) down to 100
+    return start - ((start - 100) * (t / 150));
+  }
+  if (t <= 300) {
+    // 100 -> 50
+    return 100 - ((t - 150) * (50 / 150));
+  }
+  if (t <= 600) {
+    // 50 -> 30
+    return 50 - ((t - 300) * (20 / 300));
+  }
   return 25;
 }
 
