@@ -6,9 +6,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  * • ACTIVE + LATENT each release +5 HIV virions every 10s (ART ON or OFF).
  * • When ART is OFF and an ACTIVE cell dies, it releases +50 HIV virions.
  * • Infections happen only when ART is OFF (every 2s: infect 1 + ⌊HIV/100⌋).
- * • Free virus (HIV) ONLY clears when ART is ON — now FASTER (~12%/sec).
+ * • Free virus (HIV) ONLY clears when ART is ON — faster (~12%/sec).
  * • “Introduce Pathogen” is a brief impact event (red flash) that boosts HIV by +1 per infected cell
  *   and reactivates LATENT → ACTIVE. No other pathogen is tracked.
+ * • Metrics now show BOTH Active infected and Latent infected counts.
  */
 
 const STATUS = {
@@ -338,6 +339,7 @@ export default function HIVMemoryTCellGame() {
               <li className="flex justify-between"><span>Healthy</span><span className="font-mono">{healthy}</span></li>
               <li className="flex justify-between"><span>Dead memory t-cells</span><span className="font-mono">{dead}</span></li>
               <li className="flex justify-between"><span>Active infected</span><span className="font-mono">{active}</span></li>
+              <li className="flex justify-between"><span>Latent infected</span><span className="font-mono">{latent}</span></li>
               <li className="flex justify-between col-span-2"><span>Free virus</span><span className="font-mono">{freeVirus}</span></li>
             </ul>
 
@@ -345,6 +347,7 @@ export default function HIVMemoryTCellGame() {
               <p><b>Healthy:</b> number of uninfected memory T-cells.</p>
               <p><b>Dead memory t-cells:</b> infected and dead cells.</p>
               <p><b>Active infected:</b> cells currently making virus (producers).</p>
+              <p><b>Latent infected:</b> cells harboring virus with low activity but still releasing small amounts.</p>
               <p><b>Free virus:</b> “viral load / viral count” in this simplified visual.</p>
               <p className="mt-2">
                 <b>Note:</b> This schematic visualization is not drawn to anatomical scale. Cell sizes, counts, and timing
