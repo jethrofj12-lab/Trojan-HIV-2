@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * HIV Memory T-cell Game — Simple Visual
- * Key rules unchanged:
+ * Key rules (kept):
  * • ACTIVE & LATENT each release +5 HIV virions every 10s (ART ON or OFF).
  * • When ART is OFF and an ACTIVE cell dies, it releases +50 HIV virions.
  * • Infections happen only when ART is OFF (every 2s: infect 1 + ⌊HIV/100⌋).
@@ -12,12 +12,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  *    - ART ON  ⇒ ALL ACTIVE → LATENT
  *    - ART OFF ⇒ ALL LATENT → ACTIVE
  *
- * Fixes (per your last note):
- * • Order of operations per tick: (1) trickle & bursts get ADDED, (2) then ART clearance runs,
- *   (3) finally clamp to a time-based upper envelope while ART is ON. No more “clear then re-add”.
- * • Clearance is decisively stronger and scales with both current load and #infected, but slope-limited (≤8%/s)
- *   so you don’t see a 2,650 → 200 plunge in one second.
- * • Envelope forces: ~≤100 by 2.5 min, ≤50 by 5 min, ≤40 by 10 min (with a tiny wiggle).
+ * Fixes for ART behaving like “flush”:
+ * • Tick order: Additions (trickle, bursts, button) → Clearance (ART) → Envelope clamp.
+ * • Clearance uses per-tick dt (no backlog); smooth + strong but slope-limited.
+ * • Per-tick drop guard prevents one-frame cliffs even if a frame hiccups.
+ * • Time-based envelope forces ≤100 by ~2.5m, ≤50 by ~5m, ~20–40 by ~10m.
  */
 
 const STATUS = {
@@ -50,9 +49,9 @@ export default function HIVMemoryTCellGame() {
 
   // Cadences
   const TICK_MS = 320;
+  const DT = TICK_MS / 1000; // strict per-tick delta (prevents backlog clears)
   const infectAccumRef = useRef(0);   // infections (every 2s, ART OFF)
   const trickleAccumRef = useRef(0);  // +5 per infected cell every 10s
-  const clearAccumRef = useRef(0);    // clearance (ART ON only)
 
   // Death model
   const DEATH_DELAY_MS = 30_000;                  // no deaths before 30s of being ACTIVE
@@ -95,7 +94,6 @@ export default function HIVMemoryTCellGame() {
       setElapsedMs(ms => ms + TICK_MS);
       infectAccumRef.current += TICK_MS;
       trickleAccumRef.current += TICK_MS;
-      clearAccumRef.current += TICK_MS;
 
       // 1) Move virions (positions only)
       setVirions(vs => moveVirions(vs, worldW, worldH));
@@ -153,16 +151,18 @@ export default function HIVMemoryTCellGame() {
         })
       );
 
-      // Snapshot current infected count (approx) for clearance scaling
-      const infectedApprox = cells.reduce((n, c) => n + (c.s === STATUS.ACTIVE || c.s === STATUS.LATENT ? 1 : 0), 0);
+      // Snapshot current infected count for clearance scaling (ACTIVE + LATENT)
+      const infectedApprox = cells.reduce(
+        (n, c) => n + (c.s === STATUS.ACTIVE || c.s === STATUS.LATENT ? 1 : 0),
+        0
+      );
 
       // 4) Apply virion updates in one setState:
-      //    (A) ADD trickle & bursts, (B) ART clearance, (C) envelope clamp (if ART ON)
+      //    (A) ADD trickle & bursts, (B) ART clearance with dt (no backlog), (C) envelope clamp
       setVirions(prev => {
         let vs = prev;
 
         // (A) ADDITIONS FIRST
-        // 4b) Trickle: spawn 5 * releases near each infected cell that ticked
         if (trickleSites.length) {
           const adds = [];
           for (const site of trickleSites) {
@@ -172,8 +172,6 @@ export default function HIVMemoryTCellGame() {
           }
           if (adds.length) vs = vs.concat(adds);
         }
-
-        // 4c) Death bursts (+50 at death sites) ONLY when ART OFF
         if (!artOn && deathSites.length) {
           const adds = [];
           for (const d of deathSites) {
@@ -182,29 +180,27 @@ export default function HIVMemoryTCellGame() {
           if (adds.length) vs = vs.concat(adds);
         }
 
-        // (B) ART CLEARANCE AFTER ADDITIONS — strong but slope-limited
-        if (artOn && clearAccumRef.current >= 1000) {
-          const sec = Math.floor(clearAccumRef.current / 1000);
-          clearAccumRef.current -= sec * 1000;
+        // (B) ART CLEARANCE AFTER ADDITIONS — dt-based, slope-limited
+        if (artOn) {
+          const V = vs.length;
+          const I = infectedApprox;
 
-          const current = vs.length;
+          // Parameters tuned for “~500 per 20–30s” net drop at high loads
+          const alpha = 0.01; // V-driven removal (per second)
+          const beta  = 0.48; // I-driven removal (per infected per second)
+          const gamma = 0.08; // absolute cap: ≤8% of V per second
 
-          // Base pull: combine load-proportional + infected-driven terms
-          // (net aims ~500 down per 20–30s at high loads, despite trickle)
-          let perSec = Math.max(
-            Math.floor(current * 0.03),      // 3% of load per second
-            Math.floor(infectedApprox * 0.6) // 0.6 per infected per second
-          );
+          // per-second removal target, then scale by dt
+          const rPerSec = Math.min(gamma * V, alpha * V + beta * I);
+          let remove = Math.floor(rPerSec * DT);
 
-          // Absolute slope cap: ≤8% of current per second to avoid cliffs
-          const maxProp = Math.floor(current * 0.08 * sec);
-          let remove = Math.min(perSec * sec, maxProp);
+          // Per-tick drop guard: ≤2.5% of V per tick (prevents one-frame cliff)
+          const maxPerTick = Math.floor(V * 0.025);
+          if (maxPerTick > 0) remove = Math.min(remove, maxPerTick);
 
-          // Don’t over-remove
-          remove = Math.max(0, Math.min(remove, current));
-          const after = current - remove;
-
-          vs = vs.slice(0, after);
+          // Bound
+          remove = Math.max(0, Math.min(remove, V));
+          if (remove > 0) vs = vs.slice(0, V - remove);
         }
 
         // (C) FINAL ENVELOPE CLAMP (only when ART ON)
@@ -270,7 +266,6 @@ export default function HIVMemoryTCellGame() {
     setElapsedMs(0);
     infectAccumRef.current = 0;
     trickleAccumRef.current = 0;
-    clearAccumRef.current = 0;
     setShowImpactFX(false);
     setImpactBlobs([]);
     setArtOn(false);
@@ -374,7 +369,7 @@ export default function HIVMemoryTCellGame() {
                 <li>
                   <b>ART ON/OFF:</b>
                   <ul className="list-disc list-inside ml-5">
-                    <li><b>ON:</b> ALL ACTIVE → LATENT; no new infections; strong clearance with a smooth slope; clamps to low counts over time.</li>
+                    <li><b>ON:</b> ALL ACTIVE → LATENT; no new infections; strong but smooth clearance; clamps low over time.</li>
                     <li><b>OFF:</b> ALL LATENT → ACTIVE; infections proceed; no clearance.</li>
                   </ul>
                 </li>
