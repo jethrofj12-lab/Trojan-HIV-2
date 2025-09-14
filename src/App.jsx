@@ -2,9 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * HIV Memory T-cell Game — Simple Visual
- * Changes requested:
- * - ACTIVE and LATENT cells each release 5 virions every 10 seconds (ART ON or OFF).
- * - When ART is OFF, an ACTIVE cell that dies releases 50 virions.
+ * - Global trickle: +5 virions every 10s (ART ON or OFF)
+ * - Death burst: +50 virions when ACTIVE cell dies (only when ART OFF)
+ * - Clearance: free virus decays slowly when ART OFF, faster when ART ON
  */
 
 const STATUS = {
@@ -19,7 +19,6 @@ export default function HIVMemoryTCellGame() {
   const [running, setRunning] = useState(false);
   const [artOn, setArtOn] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
-  const infectAccumRef = useRef(0);
 
   // --- World & population ---
   const worldW = 960;
@@ -32,11 +31,16 @@ export default function HIVMemoryTCellGame() {
   // Virions start at 100
   const [virions, setVirions] = useState(() => spawnVirions(100, worldW, worldH));
 
+  // Cadences
+  const infectAccumRef = useRef(0);     // infections every 2s when ART OFF
+  const trickleAccumRef = useRef(0);    // +5 virions every 10s (always)
+  const clearAccumRef = useRef(0);      // clearance rate accumulator
+
   // Death timing for ACTIVE cells (strong lag, then small chance per tick)
   const DEATH_DELAY_MS = 30_000; // 30s
   const DEATH_CHANCE_PER_TICK_AFTER_DELAY = 0.02; // per ~320ms tick
 
-  // When ART turns ON, convert ACTIVE -> LATENT (keep trickle behavior running for LATENT too)
+  // When ART turns ON, convert ACTIVE -> LATENT (no new infections while ON)
   useEffect(() => {
     if (artOn) {
       setCells(prev =>
@@ -50,13 +54,13 @@ export default function HIVMemoryTCellGame() {
     if (!running) return;
     const id = setInterval(() => {
       setElapsedMs(ms => ms + 320);
+
+      // time accumulators
       infectAccumRef.current += 320;
+      trickleAccumRef.current += 320;
+      clearAccumRef.current += 320;
 
-      // 1) Virions drift
-      setVirions(vs => moveVirions(vs, worldW, worldH));
-
-      // 2) ART OFF → infections every 2 seconds:
-      //    infect 1 healthy + 1 more per +100 virions
+      // 1) Handle infections (ART OFF)
       if (!artOn && infectAccumRef.current >= 2000) {
         const steps = Math.floor(infectAccumRef.current / 2000);
         infectAccumRef.current -= steps * 2000;
@@ -75,72 +79,83 @@ export default function HIVMemoryTCellGame() {
               if (!healthyIdx.length) break;
               const idx = healthyIdx.splice(Math.floor(Math.random() * healthyIdx.length), 1)[0];
               const c = next[idx];
-              next[idx] = { ...c, s: STATUS.ACTIVE, ageMs: 0, relMs: 0 }; // relMs = trickle timer
+              next[idx] = { ...c, s: STATUS.ACTIVE, ageMs: 0 };
             }
             return next;
           });
         }
       }
 
-      // 3) Trickle release (ACTIVE and LATENT) + ACTIVE aging/death
-      const trickleSpawns = [];
-      const deathSpawns = [];
-
+      // 2) Age ACTIVE cells & mark deaths (death burst handled below)
+      const deathSites = []; // collect where deaths happen this tick
       setCells(prev =>
         prev.map(c => {
-          // Trickle: both ACTIVE and LATENT release 5 virions every 10s
-          if (c.s === STATUS.ACTIVE || c.s === STATUS.LATENT) {
-            const rel = (c.relMs ?? 0) + 320;
-            let releases = Math.floor(rel / 10_000); // every 10s
-            if (releases > 0) {
-              for (let i = 0; i < releases; i++) {
-                trickleSpawns.push({ x: c.x, y: c.y, n: 5 });
-              }
-            }
-            const relMs = rel - releases * 10_000;
-
-            // ACTIVE can age and possibly die (only matters if still ACTIVE)
-            if (c.s === STATUS.ACTIVE) {
-              const age = (c.ageMs ?? 0) + 320;
-              if (
-                !artOn && // death burst only when ART is OFF
-                age >= DEATH_DELAY_MS &&
-                Math.random() < DEATH_CHANCE_PER_TICK_AFTER_DELAY
-              ) {
-                // death burst of 50 virions at the cell location
-                deathSpawns.push({ x: c.x, y: c.y, n: 50 });
-                return { ...c, s: STATUS.DEAD, ageMs: 0, relMs: 0 };
-              }
-              return { ...c, ageMs: age, relMs };
-            }
-
-            // LATENT: keep accumulating relMs
-            return { ...c, relMs };
+          if (c.s !== STATUS.ACTIVE) return c;
+          const age = (c.ageMs ?? 0) + 320;
+          if (!artOn && age >= DEATH_DELAY_MS && Math.random() < DEATH_CHANCE_PER_TICK_AFTER_DELAY) {
+            // record death site for +50 burst later
+            deathSites.push({ x: c.x, y: c.y });
+            return { ...c, s: STATUS.DEAD, ageMs: 0 };
           }
-
-          // DEAD or HEALTHY: unchanged
-          return c;
+          return { ...c, ageMs: age };
         })
       );
 
-      // Add spawned virions near their sources
-      if (trickleSpawns.length || deathSpawns.length) {
-        const add = [];
-        for (const { x, y, n } of trickleSpawns) {
-          add.push(...spawnVirions(n, worldW, worldH, true, [{ x, y }]));
+      // 3) Compute virion additions/removals for this tick
+      let addVirionsList = [];
+
+      // 3a) Global trickle: +5 every 10s (ART ON or OFF)
+      if (trickleAccumRef.current >= 10_000) {
+        const steps = Math.floor(trickleAccumRef.current / 10_000);
+        trickleAccumRef.current -= steps * 10_000;
+        for (let i = 0; i < steps; i++) {
+          addVirionsList.push(...spawnVirions(5, worldW, worldH, true, cells));
         }
-        for (const { x, y, n } of deathSpawns) {
-          add.push(...spawnVirions(n, worldW, worldH, true, [{ x, y }]));
-        }
-        if (add.length) setVirions(vs => vs.concat(add));
       }
+
+      // 3b) Death bursts: +50 per death (only when ART OFF)
+      if (!artOn && deathSites.length) {
+        for (const d of deathSites) {
+          addVirionsList.push(...spawnVirions(50, worldW, worldH, true, [d]));
+        }
+      }
+
+      // 3c) Clearance: slow down when ART OFF, faster when ART ON
+      //    OFF: ~1 virion/sec
+      //    ON : ~3 virions/sec  (still trickles +5/10s, but net goes down)
+      let toRemove = 0;
+      const secBlocks = Math.floor(clearAccumRef.current / 1000);
+      if (secBlocks > 0) {
+        clearAccumRef.current -= secBlocks * 1000;
+        const rate = artOn ? 3 : 1; // per second
+        toRemove = rate * secBlocks;
+      }
+
+      // 4) Single state update for virions: move -> remove -> add
+      setVirions(prevVs => {
+        // move
+        let vs = moveVirions(prevVs, worldW, worldH);
+
+        // remove (clearance)
+        if (toRemove > 0 && vs.length > 0) {
+          // remove from the end for speed
+          const keep = Math.max(0, vs.length - toRemove);
+          vs = vs.slice(0, keep);
+        }
+
+        // add spawns
+        if (addVirionsList.length) {
+          vs = vs.concat(addVirionsList);
+        }
+
+        return vs;
+      });
     }, 320);
 
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, artOn, cells, virions]);
 
-  // Derived metrics
+  // Metrics
   const healthy = cells.filter(c => c.s === STATUS.HEALTHY).length;
   const dead = cells.filter(c => c.s === STATUS.DEAD).length;
   const active = cells.filter(c => c.s === STATUS.ACTIVE).length;
@@ -160,7 +175,7 @@ export default function HIVMemoryTCellGame() {
     );
   }
 
-  function addVirions(n = 50) {
+  function addVirionsBtn(n = 50) {
     setVirions(vs => vs.concat(spawnVirions(n, worldW, worldH)));
   }
 
@@ -169,6 +184,8 @@ export default function HIVMemoryTCellGame() {
     setVirions(spawnVirions(100, worldW, worldH));
     setElapsedMs(0);
     infectAccumRef.current = 0;
+    trickleAccumRef.current = 0;
+    clearAccumRef.current = 0;
     setArtOn(false);
     setRunning(false);
   }
@@ -246,12 +263,12 @@ export default function HIVMemoryTCellGame() {
               <button onClick={introducePathogen} className="px-3 py-2 rounded-2xl bg-zinc-700">
                 Introduce Pathogen
               </button>
-              <button onClick={() => addVirions(50)} className="px-3 py-2 rounded-2xl bg-zinc-700">
+              <button onClick={() => addVirionsBtn(50)} className="px-3 py-2 rounded-2xl bg-zinc-700">
                 +50 Virions
               </button>
             </div>
 
-            {/* Instructions (as requested) */}
+            {/* Instructions */}
             <div className="mt-3 text-sm text-zinc-300 space-y-2">
               <ol className="list-decimal list-inside space-y-1">
                 <li><b>Run / Pause:</b> Starts or pauses the simulation timer and movement.</li>
@@ -285,7 +302,6 @@ export default function HIVMemoryTCellGame() {
               <li className="flex justify-between col-span-2"><span>Free virus</span><span className="font-mono">{freeVirus}</span></li>
             </ul>
 
-            {/* Metric descriptions (as requested) */}
             <div className="mt-3 text-xs text-zinc-400 space-y-1">
               <p><b>Healthy:</b> number of uninfected memory T-cells.</p>
               <p><b>Dead memory t-cells:</b> infected and dead cells.</p>
@@ -312,7 +328,7 @@ function formatTime(ms) {
 }
 
 function placeCells(n, w, h) {
-  // Jittered grid for large n (even spread, fast)
+  // Jittered grid for large n
   if (n > 200) {
     const cols = Math.ceil(Math.sqrt((n * w) / h));
     const rows = Math.ceil(n / cols);
@@ -331,8 +347,7 @@ function placeCells(n, w, h) {
     }
     return cells;
   }
-
-  // Sparse random placement
+  // Sparse random
   const cells = [];
   for (let i = 0; i < n; i++) {
     const x = 10 + Math.random() * (w - 20);
@@ -343,7 +358,6 @@ function placeCells(n, w, h) {
 }
 
 function spawnVirions(n, w, h, centerBias = false, centers = []) {
-  // If centerBias and centers provided, spawn near those points (e.g., a cell)
   const vs = [];
   for (let i = 0; i < n; i++) {
     let x, y;
