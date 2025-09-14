@@ -1,54 +1,51 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-// ------------------------------------------------------------
-// HIV Memory T-cell Game — Simple Visual (v0.3.2 — text update + latent logic for ART)
-// ------------------------------------------------------------
+/**
+ * HIV Memory T-cell Game — Simple Visual
+ * - Active cells drip 5 virions every 10 seconds
+ * - When an ACTIVE cell dies, it releases 50 virions
+ * - ART ON: ACTIVE -> LATENT (no trickle while latent)
+ * - Infection cadence (ART OFF): every 2s infect 1 healthy + 1 per +100 virions
+ */
 
 const STATUS = {
   HEALTHY: "HEALTHY",
-  LATENT: "LATENT",   // internal; not drawn, counted with ACTIVE in metrics
+  LATENT: "LATENT", // internal; not drawn distinctly in metrics (we show together with ACTIVE if desired)
   ACTIVE: "ACTIVE",
   DEAD: "DEAD",
 };
 
 export default function HIVMemoryTCellGame() {
+  // --- Simulation toggles/state ---
   const [running, setRunning] = useState(false);
-  const [artOn, setArtOn] = useState(false); // default ART OFF
-  const [showPathogenFX, setShowPathogenFX] = useState(false);
-
-  // Stopwatch + infection accumulator (drives ART-OFF infections)
+  const [artOn, setArtOn] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
-  const infectAccumRef = useRef(0);
-
-  function formatTime(ms) {
-    const s = Math.max(0, Math.floor(ms / 1000));
-    const m = Math.floor(s / 60);
-    const ss = String(s % 60).padStart(2, "0");
-    return `${m}:${ss}`;
-  }
-
-  // Playfield
-  const worldW = 960;
-  const worldH = 600;
-
-  // Cells
-  const cellCount = 1000;
-  const initial = useMemo(() => placeCells(cellCount, worldW, worldH), []);
-  const [cells, setCells] = useState(initial);
-
-  // Free virus starts at 100; only changes via +50, Flush, or Introduce Pathogen
-  const [virions, setVirions] = useState(() => spawnVirions(100, worldW, worldH));
   const [tick, setTick] = useState(0);
 
-  // Death timing: active cells can only die after this delay (strong lag)
-  const DEATH_DELAY_MS = 30000; // 30s lag before any deaths start
-  const DEATH_CHANCE_PER_TICK_AFTER_DELAY = 0.02; // then small chance each tick
+  // --- World & population ---
+  const worldW = 960;
+  const worldH = 600;
+  const cellCount = 1000;
 
-  // When ART turns ON, convert ACTIVE -> LATENT (quiet / internal)
+  // Place cells in a jittered grid for performance and visual distribution
+  const initialCells = useMemo(() => placeCells(cellCount, worldW, worldH), []);
+  const [cells, setCells] = useState(initialCells);
+
+  // Virions: start at 100
+  const [virions, setVirions] = useState(() => spawnVirions(100, worldW, worldH));
+
+  // Infection cadence accumulator (ART OFF)
+  const infectAccumRef = useRef(0);
+
+  // Death timing: ACTIVE cells can only die after this delay; then a small chance per tick
+  const DEATH_DELAY_MS = 30_000; // 30s lag
+  const DEATH_CHANCE_PER_TICK_AFTER_DELAY = 0.02; // 2% per tick (~320ms)
+
+  // When ART turns ON, convert ACTIVE -> LATENT and reset their trickle timers
   useEffect(() => {
     if (artOn) {
       setCells(prev =>
-        prev.map(c => (c.s === STATUS.ACTIVE ? { ...c, s: STATUS.LATENT, ageMs: 0 } : c))
+        prev.map(c => (c.s === STATUS.ACTIVE ? { ...c, s: STATUS.LATENT, ageMs: 0, relMs: 0 } : c))
       );
     }
   }, [artOn]);
@@ -59,11 +56,9 @@ export default function HIVMemoryTCellGame() {
     const id = setInterval(() => {
       setTick(t => t + 1);
       setElapsedMs(ms => ms + 320);
-
-      // Accumulator for 2s infection cadence (ART OFF only)
       infectAccumRef.current += 320;
 
-      // 1) Virions drift (positions only) — no auto growth/decay
+      // 1) Virions drift (positions only)
       setVirions(vs => moveVirions(vs, worldW, worldH));
 
       // 2) ART OFF → infections happen in batches every 2 seconds:
@@ -71,6 +66,7 @@ export default function HIVMemoryTCellGame() {
       if (!artOn && infectAccumRef.current >= 2000) {
         const steps = Math.floor(infectAccumRef.current / 2000);
         infectAccumRef.current -= steps * 2000;
+
         for (let s = 0; s < steps; s++) {
           setCells(prev => {
             const next = [...prev];
@@ -86,62 +82,90 @@ export default function HIVMemoryTCellGame() {
               const idx = healthyIdx.splice(Math.floor(Math.random() * healthyIdx.length), 1)[0];
               const c = next[idx];
               // become ACTIVE immediately (no visible latent on infection)
-              next[idx] = { ...c, s: STATUS.ACTIVE, ageMs: 0 };
+              next[idx] = { ...c, s: STATUS.ACTIVE, ageMs: 0, relMs: 0 }; // relMs starts trickle timer
             }
             return next;
           });
         }
       }
 
-      // 3) Advance ACTIVE ages and handle deaths with a strong lag
+      // 3) Active cells trickle release + age + handle deaths (with lag)
+      const trickleSpawns = [];
+      const deathSpawns = [];
       setCells(prev =>
         prev.map(c => {
           if (c.s !== STATUS.ACTIVE) return c;
+
+          // accumulate trickle timer; every 10s release 5 virions
+          const rel = (c.relMs ?? 0) + 320;
+          let releases = Math.floor(rel / 10_000); // 10s
+          if (releases > 0) {
+            for (let i = 0; i < releases; i++) {
+              trickleSpawns.push({ x: c.x, y: c.y, n: 5 });
+            }
+          }
+          const relMs = rel - releases * 10_000;
+
+          // age and possible death (after strong lag)
           const age = (c.ageMs ?? 0) + 320;
           if (age >= DEATH_DELAY_MS && Math.random() < DEATH_CHANCE_PER_TICK_AFTER_DELAY) {
-            return { ...c, s: STATUS.DEAD, ageMs: 0 };
+            // death burst of 50 virions at the cell location
+            deathSpawns.push({ x: c.x, y: c.y, n: 50 });
+            return { ...c, s: STATUS.DEAD, ageMs: 0, relMs: 0 };
           }
-          return { ...c, ageMs: age };
+
+          return { ...c, ageMs: age, relMs };
         })
       );
+
+      // After updating cells, add any spawned virions near their source
+      if (trickleSpawns.length || deathSpawns.length) {
+        const add = [];
+        for (const { x, y, n } of trickleSpawns) {
+          add.push(...spawnVirions(n, worldW, worldH, true, [{ x, y }]));
+        }
+        for (const { x, y, n } of deathSpawns) {
+          add.push(...spawnVirions(n, worldW, worldH, true, [{ x, y }]));
+        }
+        if (add.length) {
+          setVirions(vs => vs.concat(add));
+        }
+      }
     }, 320);
+
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, artOn, cells, virions]);
 
-  // Derived counts (latent counted together with active)
+  // Derived counts (you can choose to display latent separately if you want)
   const healthy = cells.filter(c => c.s === STATUS.HEALTHY).length;
   const active = cells.filter(c => c.s === STATUS.ACTIVE).length;
   const latent = cells.filter(c => c.s === STATUS.LATENT).length;
   const activeLatent = active + latent;
   const dead = cells.filter(c => c.s === STATUS.DEAD).length;
+  const freeVirus = Array.isArray(virions) ? virions.length : 0;
 
-  // Actions
-  function flushVirus() {
+  // UI handlers
+  function flushFreeVirus() {
     setVirions([]);
   }
 
   function introducePathogen() {
-    // Visual FX
-    setShowPathogenFX(true);
-    setTimeout(() => setShowPathogenFX(false), 800);
-
-    // Pathogen increases free virus
+    // Boost free virus near random cells and reactivate latent cells
     const PATHOGEN_VIRUS_BOOST = 100;
     setVirions(vs => vs.concat(spawnVirions(PATHOGEN_VIRUS_BOOST, worldW, worldH, true, cells)));
-
-    // Reactivate latent cells → ACTIVE
-    setCells(prev => prev.map(c => (c.s === STATUS.LATENT ? { ...c, s: STATUS.ACTIVE, ageMs: 0 } : c)));
+    setCells(prev =>
+      prev.map(c => (c.s === STATUS.LATENT ? { ...c, s: STATUS.ACTIVE, ageMs: 0, relMs: 0 } : c))
+    );
   }
 
-  // Manually introduce more free HIV virions
-  function addVirions(n = 10) {
+  function addVirions(n = 50) {
     setVirions(vs => vs.concat(spawnVirions(n, worldW, worldH)));
   }
 
   function reset() {
     setCells(placeCells(cellCount, worldW, worldH));
     setVirions(spawnVirions(100, worldW, worldH)); // reset back to 100
-    setShowPathogenFX(false);
     setTick(0);
     setElapsedMs(0);
     infectAccumRef.current = 0;
@@ -151,148 +175,138 @@ export default function HIVMemoryTCellGame() {
 
   return (
     <div className="w-full min-h-screen bg-zinc-950 text-zinc-100 p-6 flex flex-col gap-6">
+      {/* Header */}
       <header className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl md:text-3xl font-semibold">HIV & Memory T-cells — Simple Visual</h1>
-      <div className="flex items-center gap-2">
+        <h1 className="text-2xl md:text-3xl font-semibold">HIV &amp; Memory T-cells — Simple Visual</h1>
+        <div className="flex items-center gap-2">
           <div className="px-3 py-1 rounded-xl bg-zinc-800/70 font-mono">{formatTime(elapsedMs)}</div>
-          <button onClick={() => setRunning(r => !r)} className={`px-4 py-2 rounded-2xl shadow ${running ? "bg-amber-600" : "bg-emerald-600"}`}>{running ? "Pause" : "Run"}</button>
-          <button onClick={reset} className="px-3 py-2 rounded-2xl bg-zinc-700">Reset</button>
+          <button
+            onClick={() => setRunning(r => !r)}
+            className={`px-3 py-2 rounded-2xl ${running ? "bg-amber-600" : "bg-emerald-600"}`}
+          >
+            {running ? "Pause" : "Run"}
+          </button>
+          <button onClick={reset} className="px-3 py-2 rounded-2xl bg-zinc-700">
+            Reset
+          </button>
         </div>
       </header>
 
+      {/* Layout */}
       <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Playfield */}
-        <div className="col-span-2">
-          <div className="relative rounded-3xl bg-zinc-900 shadow-inner overflow-hidden" style={{ width: worldW, height: worldH }}>
-            <svg width={worldW} height={worldH}>
-              {/* Pathogen FX */}
-              {showPathogenFX && (
-                <g opacity={0.25}>
-                  <Star cx={worldW*0.2} cy={worldH*0.3} r={70} />
-                  <Star cx={worldW*0.6} cy={worldH*0.5} r={90} />
-                  <Star cx={worldW*0.85} cy={worldH*0.2} r={60} />
-                </g>
-              )}
-
-              {/* Cells (LATENT is hidden) */}
-              {cells.map((c, i) => (
-                <g key={i}>
-                  {c.s === STATUS.HEALTHY && <circle cx={c.x} cy={c.y} r={c.r} className="fill-emerald-500" />}
-                  {c.s === STATUS.ACTIVE && (
-                    <circle cx={c.x} cy={c.y} r={c.r} className="fill-red-500">
-                      <animate attributeName="r" values={`${c.r};${c.r+2};${c.r}`} dur="0.9s" repeatCount="indefinite" />
-                    </circle>
-                  )}
-                  {c.s === STATUS.DEAD && <circle cx={c.x} cy={c.y} r={c.r} className="fill-zinc-600" />}
-                </g>
-              ))}
-
-              {/* Virions */}
+        <div className="col-span-2 rounded-3xl bg-zinc-900 p-4">
+          <svg viewBox={`0 0 ${worldW} ${worldH}`} className="w-full h-[480px] md:h-[560px] rounded-2xl bg-zinc-950">
+            {/* Virions */}
+            <g>
               {virions.map((v, i) => (
-                <circle key={i} cx={v.x} cy={v.y} r={3} className="fill-fuchsia-400" />
+                <circle key={`v-${i}`} cx={v.x} cy={v.y} r={1.6} fill="#9ca3af" opacity="0.9" />
               ))}
-            </svg>
-          </div>
-          <div className="flex flex-wrap gap-3 mt-3 text-xs text-zinc-300">
-            <LegendDot cls="bg-emerald-500" label="Healthy memory T-cell" />
-            <LegendDot cls="bg-red-500" label="Active infected" />
-            <LegendDot cls="bg-zinc-600" label="Dead memory T-cell" />
-            <LegendDot cls="bg-fuchsia-400" label="HIV virion" small />
-          </div>
+            </g>
+
+            {/* Cells */}
+            <g>
+              {cells.map((c, i) => {
+                let fill = "#22c55e"; // healthy = green
+                let stroke = "transparent";
+                if (c.s === STATUS.ACTIVE) fill = "#ef4444"; // red
+                else if (c.s === STATUS.LATENT) {
+                  fill = "#f59e0b"; // amber
+                  stroke = "#fde68a";
+                } else if (c.s === STATUS.DEAD) fill = "#6b7280"; // gray
+
+                return (
+                  <circle
+                    key={`c-${i}`}
+                    cx={c.x}
+                    cy={c.y}
+                    r={c.r ?? 4}
+                    fill={fill}
+                    stroke={stroke}
+                    strokeWidth={stroke === "transparent" ? 0 : 1}
+                    opacity={c.s === STATUS.DEAD ? 0.5 : 0.9}
+                  />
+                );
+              })}
+            </g>
+          </svg>
         </div>
 
-        {/* Controls + explanations + metrics (your exact wording) */}
-        <div className="rounded-3xl p-4 bg-zinc-900 shadow-inner flex flex-col gap-3">
-          <h2 className="text-lg font-semibold">Play</h2>
-          <div className="flex flex-wrap gap-2">
-            <button onClick={() => setArtOn(v => !v)} className={`px-3 py-2 rounded-2xl ${artOn ? "bg-indigo-500" : "bg-indigo-700"}`}>{artOn ? "ART: ON (suppresses spread)" : "ART: OFF"}</button>
-            <button onClick={flushVirus} className="px-3 py-2 rounded-2xl bg-purple-800">Flush Free Virus</button>
-            <button onClick={() => addVirions(50)} className="px-3 py-2 rounded-2xl bg-pink-600">+50 Virions</button>
-            <button onClick={introducePathogen} className="px-3 py-2 rounded-2xl bg-rose-700">Introduce Pathogen</button>
-          </div>
-
-          <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
-            <Metric label="Healthy" value={healthy} />
-            <Metric label="Active/latent" value={activeLatent} />
-            <Metric label="Dead memory t-cells" value={dead} />
-            <Metric label="Free virus" value={virions.length} />
-          </div>
-
-          <div className="mt-3 text-sm text-zinc-200 space-y-3">
-            <div>
-              <p className="font-semibold">Controls and what they mean -</p>
-              <ol className="list-decimal ml-5 space-y-1">
-                <li><strong>Run / Pause:</strong> Starts or pauses the simulation timer and movement.</li>
-                <li><strong>ART ON/OFF:</strong>
-                  <ol className="list-[lower-alpha] ml-5 space-y-1 mt-1">
-                    <li><strong>ON:</strong> Active cells become latent; blocks viral entry/replication, no new infections and producers don’t release new virus.</li>
-                    <li><strong>OFF:</strong> Active Infected memory t-cells. infections proceed.</li>
-                  </ol>
-                </li>
-                <li><strong>Flush Free Virus:</strong> Clears free virus in the “blood” (viral load → 0) but doesn’t remove infected cells.</li>
-                <li><strong>Introduce Pathogen:</strong> Mimics a new infection that wakes up memory cells; latent cells can reactivate.</li>
-                <li><strong>+50 Virions:</strong> Adds 50 free virus particles, this represents either:
-                  <ol className="list-[lower-alpha] ml-5 space-y-1 mt-1">
-                    <li>infected memory T-cells releasing virus or</li>
-                    <li>new exposure entering the body (e.g., sharing needles with an infected person or sexual transmission).</li>
-                  </ol>
-                </li>
-              </ol>
+        {/* Controls & Metrics */}
+        <div className="col-span-1 flex flex-col gap-4">
+          <div className="rounded-3xl bg-zinc-900 p-4">
+            <h2 className="text-lg font-semibold mb-2">Controls</h2>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => setArtOn(a => !a)}
+                className={`px-3 py-2 rounded-2xl ${artOn ? "bg-sky-600" : "bg-zinc-700"}`}
+              >
+                ART {artOn ? "ON" : "OFF"}
+              </button>
+              <button onClick={flushFreeVirus} className="px-3 py-2 rounded-2xl bg-zinc-700">
+                Flush Free Virus
+              </button>
+              <button onClick={introducePathogen} className="px-3 py-2 rounded-2xl bg-zinc-700">
+                Introduce Pathogen
+              </button>
+              <button onClick={() => addVirions(50)} className="px-3 py-2 rounded-2xl bg-zinc-700">
+                +50 Virions
+              </button>
             </div>
-
-            <div>
-              <p className="font-semibold">Metrics -</p>
-              <ol className="list-decimal ml-5 space-y-1">
-                <li><strong>Healthy:</strong> number of uninfected memory T-cells.</li>
-                <li><strong>Dead memory t-cells:</strong> infected and dead cells </li>
-                <li><strong>Active/latent:</strong> cells currently active or latent (quiet).</li>
-                <li><strong>Free virus:</strong> “viral load / viral count” in this simplified visual.</li>
-              </ol>
-            </div>
-
-            <p className="text-[11px] text-zinc-400 leading-snug">
-              <strong>Note:</strong> This schematic visualization is not drawn to anatomical scale. Cell sizes, counts, and timing; including infection frequency are intentionally simplified for educational purposes and do not represent clinical infection rates, transmission probabilities, or treatment performance.
+            <p className="text-xs text-zinc-400 mt-2">
+              ART ON: ACTIVE → LATENT; latent cells don’t trickle virus.
             </p>
+          </div>
+
+          <div className="rounded-3xl bg-zinc-900 p-4">
+            <h2 className="text-lg font-semibold mb-2">Metrics</h2>
+            <ul className="grid grid-cols-2 gap-2 text-sm">
+              <li className="flex justify-between">
+                <span>Healthy</span>
+                <span className="font-mono">{healthy}</span>
+              </li>
+              <li className="flex justify-between">
+                <span>Active infected</span>
+                <span className="font-mono">{active}</span>
+              </li>
+              <li className="flex justify-between">
+                <span>Latent</span>
+                <span className="font-mono">{latent}</span>
+              </li>
+              <li className="flex justify-between">
+                <span>Dead memory T-cells</span>
+                <span className="font-mono">{dead}</span>
+              </li>
+              <li className="flex justify-between col-span-2">
+                <span>Free virus</span>
+                <span className="font-mono">{freeVirus}</span>
+              </li>
+            </ul>
+          </div>
+
+          <div className="rounded-3xl bg-zinc-900 p-4">
+            <h2 className="text-lg font-semibold mb-2">Notes</h2>
+            <ul className="list-disc list-inside text-sm text-zinc-300 space-y-1">
+              <li>Active cells drip 5 virions / 10s.</li>
+              <li>Death releases 50 virions at the cell’s location.</li>
+              <li>ART suppresses new infections and converts ACTIVE → LATENT.</li>
+            </ul>
           </div>
         </div>
       </section>
-
-      <footer className="text-[11px] text-zinc-500">v0.3.2 • Educational demo. Not medical advice.</footer>
     </div>
   );
 }
 
-function Metric({ label, value }) {
-  return (
-    <div className="bg-zinc-800 rounded-2xl p-3">
-      <div className="text-[11px] text-zinc-400">{label}</div>
-      <div className="text-lg font-semibold">{value}</div>
-    </div>
-  );
+/* -------------------------- helpers -------------------------- */
+
+function formatTime(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return `${m}:${ss}`;
 }
 
-function LegendDot({ cls, label, ring, small }) {
-  return (
-    <div className="flex items-center gap-2">
-      <div className={`rounded-full ${small ? "w-3 h-3" : "w-4 h-4"} ${ring ? "bg-zinc-900 border border-yellow-300" : cls}`} />
-      <span>{label}</span>
-    </div>
-  );
-}
-
-function Star({ cx, cy, r }) {
-  const spikes = 8;
-  const path = [];
-  for (let i = 0; i < spikes * 2; i++) {
-    const angle = (Math.PI * i) / spikes;
-    const radius = i % 2 === 0 ? r : r * 0.45;
-    path.push(`${i === 0 ? "M" : "L"}${cx + Math.cos(angle) * radius},${cy + Math.sin(angle) * radius}`);
-  }
-  path.push("Z");
-  return <path d={path.join(" ")} className="fill-fuchsia-500" />;
-}
-
-// ---------- Layout helpers ----------
 function placeCells(n, w, h) {
   // Jittered grid for big n (fast + even)
   if (n > 200) {
@@ -314,27 +328,23 @@ function placeCells(n, w, h) {
     return cells;
   }
 
-  // small-n fallback
+  // Sparse random placement
   const cells = [];
-  let tries = 0;
-  while (cells.length < n && tries < 50000) {
-    tries++;
-    const r = 16;
-    const x = 20 + Math.random() * (w - 40);
-    const y = 20 + Math.random() * (h - 40);
-    if (cells.every(c => dist(c.x, c.y, x, y) > c.r + r + 10)) {
-      cells.push({ x, y, r, s: STATUS.HEALTHY });
-    }
+  for (let i = 0; i < n; i++) {
+    const x = 10 + Math.random() * (w - 20);
+    const y = 10 + Math.random() * (h - 20);
+    cells.push({ x, y, r: 4, s: STATUS.HEALTHY });
   }
   return cells;
 }
 
-function spawnVirions(n, w, h, centerBias = false, cells = []) {
+function spawnVirions(n, w, h, centerBias = false, centers = []) {
+  // centers: optional array of {x,y} to bias spawning near
   const vs = [];
   for (let i = 0; i < n; i++) {
     let x, y;
-    if (centerBias && cells.length) {
-      const c = cells[Math.floor(Math.random() * cells.length)];
+    if (centerBias && centers.length > 0) {
+      const c = centers[Math.floor(Math.random() * centers.length)];
       x = c.x + (Math.random() - 0.5) * 20;
       y = c.y + (Math.random() - 0.5) * 20;
     } else {
@@ -347,29 +357,36 @@ function spawnVirions(n, w, h, centerBias = false, cells = []) {
 }
 
 function moveVirions(vs, w, h) {
-  return vs.map(v => {
+  const next = new Array(vs.length);
+  for (let i = 0; i < vs.length; i++) {
+    const v = vs[i];
     let x = v.x + v.vx;
     let y = v.y + v.vy;
     let vx = v.vx;
     let vy = v.vy;
-    if (x < 6 || x > w - 6) vx *= -1;
-    if (y < 6 || y > h - 6) vy *= -1;
-    return { x: clamp(x, 6, w - 6), y: clamp(y, 6, h - 6), vx, vy };
-  });
+
+    // bounce off walls
+    if (x < 2) { x = 2; vx = Math.abs(vx); }
+    else if (x > w - 2) { x = w - 2; vx = -Math.abs(vx); }
+    if (y < 2) { y = 2; vy = Math.abs(vy); }
+    else if (y > h - 2) { y = h - 2; vy = -Math.abs(vy); }
+
+    // slight random drift
+    vx += (Math.random() - 0.5) * 0.1;
+    vy += (Math.random() - 0.5) * 0.1;
+    // clamp speeds
+    const speed = Math.hypot(vx, vy);
+    const maxS = 1.6;
+    if (speed > maxS) {
+      vx = (vx / speed) * maxS;
+      vy = (vy / speed) * maxS;
+    }
+
+    next[i] = { x, y, vx, vy };
+  }
+  return next;
 }
 
-function dist(x1, y1, x2, y2) {
-  const dx = x1 - x2; const dy = y1 - y2; return Math.hypot(dx, dy);
+function clamp(n, lo, hi) {
+  return Math.max(lo, Math.min(hi, n));
 }
-
-function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
-
-
-
-
-
-
-
-
-
-
