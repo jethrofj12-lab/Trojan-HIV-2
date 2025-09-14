@@ -2,13 +2,13 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * HIV Memory T-cell Game — Simple Visual
- * Spec implemented:
+ * Updates:
  * • ACTIVE + LATENT each release +5 HIV virions every 10s (ART ON or OFF).
  * • When ART is OFF and an ACTIVE cell dies, it releases +50 HIV virions.
  * • Infections happen only when ART is OFF (every 2s: infect 1 + ⌊HIV/100⌋).
- * • Free virus (HIV) ONLY clears (decreases) when ART is ON.
- * • “Introduce Pathogen” is an impact event (red flash). It does NOT track other pathogens.
- *    It boosts HIV by +5 × (# of infected cells) and reactivates LATENT → ACTIVE.
+ * • Free virus (HIV) ONLY clears when ART is ON — now FASTER (~12%/sec).
+ * • “Introduce Pathogen” is a brief impact event (red flash) that boosts HIV by +1 per infected cell
+ *   and reactivates LATENT → ACTIVE. No other pathogen is tracked.
  */
 
 const STATUS = {
@@ -46,7 +46,7 @@ export default function HIVMemoryTCellGame() {
   const clearAccumRef = useRef(0);    // clearance (ART ON only)
 
   // Death model
-  const DEATH_DELAY_MS = 30_000;                 // no deaths before 30s of being ACTIVE
+  const DEATH_DELAY_MS = 30_000;                  // no deaths before 30s of being ACTIVE
   const DEATH_CHANCE_PER_TICK_AFTER_DELAY = 0.02; // chance per tick after delay, ART OFF only
 
   // ART ON converts ACTIVE → LATENT (keeps trickle running from LATENT)
@@ -67,7 +67,7 @@ export default function HIVMemoryTCellGame() {
       trickleAccumRef.current += TICK_MS;
       clearAccumRef.current += TICK_MS;
 
-      // 1) Move virions
+      // 1) Move virions (positions only)
       setVirions(vs => moveVirions(vs, worldW, worldH));
 
       // 2) Infections (only ART OFF): every 2s infect 1 + floor(HIV/100)
@@ -97,78 +97,69 @@ export default function HIVMemoryTCellGame() {
       }
 
       // 3) Per-cell trickle (ACTIVE + LATENT) and ACTIVE aging/death (burst only ART OFF)
-      const deathSites = []; // collect death sites this tick for +50 bursts
+      const deathSites = [];     // where deaths happened this tick
+      const trickleSites = [];   // {x, y, releases} to spawn later
+
       setCells(prev =>
         prev.map(c => {
-          // Both ACTIVE and LATENT drip +5 / 10s
           if (c.s === STATUS.ACTIVE || c.s === STATUS.LATENT) {
+            // trickle every 10s: +5 per release
             const rel = (c.relMs ?? 0) + TICK_MS;
-            let releases = Math.floor(rel / 10_000); // every 10s
-            let relMs = rel - releases * 10_000;
-
-            // Store trickle count on the cell for this tick (we'll materialize after state update)
-            if (releases > 0) {
-              // We’ll attach a temp field so we can read it after setCells with a second pass
-              // but simpler: we’ll just push to a global counter via closure below using a ref.
-            }
+            const releases = Math.floor(rel / 10_000); // every 10s
+            const relMs = rel - releases * 10_000;
+            if (releases > 0) trickleSites.push({ x: c.x, y: c.y, releases });
 
             if (c.s === STATUS.ACTIVE) {
               const age = (c.ageMs ?? 0) + TICK_MS;
               if (!artOn && age >= DEATH_DELAY_MS && Math.random() < DEATH_CHANCE_PER_TICK_AFTER_DELAY) {
                 deathSites.push({ x: c.x, y: c.y });
-                return { ...c, s: STATUS.DEAD, ageMs: 0, relMs: 0, _releases: releases };
+                return { ...c, s: STATUS.DEAD, ageMs: 0, relMs: 0 };
               }
-              return { ...c, ageMs: age, relMs, _releases: releases };
+              return { ...c, ageMs: age, relMs };
             }
-            return { ...c, relMs, _releases: releases };
+            return { ...c, relMs };
           }
-
-          return { ...c, _releases: 0 };
+          return c;
         })
       );
 
-      // 4) Materialize trickle and death bursts in a single virion update
+      // 4) Apply virion updates in one setState: clearance (ART ON), trickle spawns, death bursts
       setVirions(prev => {
         let vs = prev;
 
-        // 4a) Clearance ONLY when ART ON (proportional so it trends down)
+        // 4a) Clearance ONLY when ART ON — faster now (~12%/sec)
         if (artOn && clearAccumRef.current >= 1000) {
           const sec = Math.floor(clearAccumRef.current / 1000);
           clearAccumRef.current -= sec * 1000;
-          const toRemovePerSec = Math.max(1, Math.floor(vs.length * 0.05)); // ~5%/sec
-          const totalRemove = toRemovePerSec * sec;
-          if (totalRemove > 0 && vs.length > 0) {
-            const keep = Math.max(0, vs.length - totalRemove);
+          const remove = Math.max(sec, Math.floor(vs.length * 0.12 * sec)); // at least 1/sec if any
+          if (remove > 0 && vs.length > 0) {
+            const keep = Math.max(0, vs.length - remove);
             vs = vs.slice(0, keep);
           }
         }
 
-        // 4b) Trickle: for each infected cell, add 5 * releases near that cell
-        const infectedNow = cells.filter(c => c.s === STATUS.ACTIVE || c.s === STATUS.LATENT);
-        const adds = [];
-        for (const c of infectedNow) {
-          const releases = c._releases ?? 0;
-          for (let i = 0; i < releases; i++) {
-            adds.push(...spawnVirions(5, worldW, worldH, true, [{ x: c.x, y: c.y }]));
+        // 4b) Trickle: spawn 5 * releases near each infected cell that ticked
+        if (trickleSites.length) {
+          const adds = [];
+          for (const site of trickleSites) {
+            for (let i = 0; i < site.releases; i++) {
+              adds.push(...spawnVirions(5, worldW, worldH, true, [{ x: site.x, y: site.y }]));
+            }
           }
+          if (adds.length) vs = vs.concat(adds);
         }
 
         // 4c) Death bursts (+50 at death sites) ONLY when ART OFF
         if (!artOn && deathSites.length) {
+          const adds = [];
           for (const d of deathSites) {
             adds.push(...spawnVirions(50, worldW, worldH, true, [d]));
           }
+          if (adds.length) vs = vs.concat(adds);
         }
 
-        if (adds.length) vs = vs.concat(adds);
         return vs;
       });
-
-      // 5) Clean temp per-tick fields
-      setCells(prev => prev.map(c => {
-        const { _releases, ...rest } = c;
-        return rest;
-      }));
     }, TICK_MS);
 
     return () => clearInterval(id);
@@ -187,9 +178,8 @@ export default function HIVMemoryTCellGame() {
   }
 
   function introducePathogen() {
-    // Impact event: visual flash + large blobs (no persistent non-HIV tracking)
+    // Impact event: visual flash + big transient blobs (no persistent other pathogen)
     setShowImpactFX(true);
-    // create a few big blob positions for the flash
     const blobs = [];
     for (let i = 0; i < 8; i++) {
       blobs.push({
@@ -201,9 +191,9 @@ export default function HIVMemoryTCellGame() {
     setImpactBlobs(blobs);
     setTimeout(() => setShowImpactFX(false), 800);
 
-    // Boost HIV free virus by +5 × (# infected cells)
+    // Boost HIV by +1 × (# infected cells)
     const infectedCount = active + latent;
-    const boost = Math.max(0, infectedCount) * 5;
+    const boost = Math.max(0, infectedCount) * 1;
     if (boost > 0) {
       setVirions(vs => vs.concat(spawnVirions(boost, worldW, worldH, true, cells)));
     }
@@ -324,12 +314,12 @@ export default function HIVMemoryTCellGame() {
                 <li>
                   <b>ART ON/OFF:</b>
                   <ul className="list-disc list-inside ml-5">
-                    <li><b>ON:</b> blocks viral entry/replication → no new infections; HIV clears over time.</li>
+                    <li><b>ON:</b> blocks viral entry/replication → no new infections; HIV clears faster over time.</li>
                     <li><b>OFF:</b> infections proceed; no clearance.</li>
                   </ul>
                 </li>
                 <li><b>Flush Free Virus:</b> Clears free HIV in the “blood” (viral load = 0) but doesn’t remove infected cells.</li>
-                <li><b>Introduce Pathogen:</b> Brief impact event (red flash) that boosts HIV by +5 per infected cell and reactivates latent cells.</li>
+                <li><b>Introduce Pathogen:</b> Brief impact event (red flash) that boosts HIV by <b>+1 per infected cell</b> and reactivates latent cells.</li>
                 <li>
                   <b>+50 Virions:</b> Adds 50 HIV particles, representing either:
                   <ul className="list-disc list-inside ml-5">
@@ -391,7 +381,7 @@ function placeCells(n, w, h) {
       const col = i % cols;
       const row = Math.floor(i / cols);
       const jitterX = (Math.random() - 0.5) * cellW * 0.4;
-      const jitterY = (Math.random() - 0) * cellH * 0.4;
+      const jitterY = (Math.random() - 0.5) * cellH * 0.4;
       const x = (col + 0.5) * cellW + jitterX;
       const y = (row + 0.5) * cellH + jitterY;
       cells.push({ x: clamp(x, 6, w - 6), y: clamp(y, 6, h - 6), r, s: STATUS.HEALTHY });
