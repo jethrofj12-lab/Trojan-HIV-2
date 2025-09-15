@@ -192,18 +192,18 @@ export default function HIVMemoryTCellGame() {
           // parameters tuned for scale-free behavior
           const alpha = 0.008; // V-driven removal (per second)
           const beta  = 0.50;  // I-driven removal (per infected per second)
-          const gamma = 0.06;  // absolute cap: ≤6% of V per second
-          const kappa = 0.04;  // extra pull when above time-curve cap
+          const gamma = 0.06;  // absolute cap: ≤6% of V per second  (kept for reference; not used below)
+          const kappa = 0.04;  // extra pull toward/away from the time-curve cap
           const TAU_TICK = 0.018; // ≤1.8% of V per tick (visual drop guard)
 
           // time since ART ON + soft cap starting at v0
           const tMs = (artOnStartMsRef.current == null) ? 0 : (elapsedMs + TICK_MS) - artOnStartMsRef.current;
           const cap = artSoftCapMs(tMs, v0AtOnRef.current || V);
 
-          // per-second clearance target (no rounding)
-          const rPerSec = Math.min(
-            gamma * V,
-            alpha * V + beta * I + kappa * Math.max(0, V - cap)
+          // per-second clearance target (signed controller; no γ·V cap to avoid choking below drip)
+          const rPerSec = Math.max(
+            0,
+            alpha * V + beta * I + kappa * (V - cap)
           );
 
           // apply dt with fractional carry
@@ -211,8 +211,9 @@ export default function HIVMemoryTCellGame() {
           let remove = Math.floor(removedFloat);
           clearCarryRef.current = removedFloat - remove;
 
-          // Per-tick drop guard
-          const maxPerTick = Math.floor(V * TAU_TICK);
+          // Per-tick drop guard — allow at least a bit more than the drip so ART can win
+          const A_tick = 0.5 * I * DT; // additions from trickle this tick
+          const maxPerTick = Math.max(Math.floor(V * TAU_TICK), Math.ceil(A_tick * 1.25));
           if (maxPerTick > 0) remove = Math.min(remove, maxPerTick);
 
           remove = Math.max(0, Math.min(remove, V));
